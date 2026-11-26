@@ -1,0 +1,28 @@
+# Bants server — Docker Compose
+# On Unraid: Docker tab → Compose Manager → Add New Stack → paste this in,
+# set INVITE_CODE in the stack's .env, then "Compose Up".
+name: bants
+
+services:
+  bants:
+    # Pre-built image from GitHub Actions. To build from source on the server instead,
+    # comment out "image" and uncomment "build", then run: docker compose up -d --build
+    image: ghcr.io/wellsey001/bants:latest
+    # build: https://github.com/wellsey001/Bants.git#main
+    container_name: bants-server
+    restart: unless-stopped
+    ports:
+      - "42069:42069"
+    volumes:
+      - /mnt/user/appdata/bants-server:/data
+    environment:
+      PORT: "42069"
+      DATA_DIR: /data
+      INVITE_CODE: ${INVITE_CODE:-}
+      ALLOW_REGISTRATION: ${ALLOW_REGISTRATION:-true}
+      MAX_UPLOAD_MB: ${MAX_UPLOAD_MB:-50}
+      FCM_SERVICE_ACCOUNT: ${FCM_SERVICE_ACCOUNT:-}
+      TZ: Europe/London
+    labels:
+      net.unraid.docker.icon: https://raw.githubusercontent.com/wellsey001/Bants/main/assets/icon.png
+      net.unraid.docker.webui: http://[IP]:[PORT:42069]/api/health

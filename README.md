@@ -18,12 +18,21 @@ Self-hosted backend for **Bants**, a WhatsApp-style messaging app. It runs as on
 
 ## 2. Run it on Unraid
 
-**Option A: template (recommended)**
-1. Copy `unraid/bants-server.xml` to `/boot/config/plugins/dockerMan/templates-user/` on your Unraid flash drive. You can do this from the Unraid terminal or over SMB to the `flash` share.
-2. In **Docker → Add Container**, choose **bants-server** from the Template dropdown.
-3. Set an **Invite code**. Friends will need it to sign up. Then click **Apply**.
+**Option A: Docker Compose (recommended)**
+1. Install the **Docker Compose Manager** plugin from Community Applications if you don't have it.
+2. On the Docker tab, under Compose, click **Add New Stack** and name it `bants`.
+3. Click the stack's cog → **Edit Stack** → **Compose File**, and paste in `compose.yml` from this repo.
+4. Click the cog → **Edit Stack** → **ENV**, and paste `.env.example` with your own invite code.
+5. Click **Compose Up**. Use **Update Stack** later to pull new versions.
 
-**Option B: compose.** If you use the Compose Manager plugin, use `docker-compose.yml`.
+From the Unraid terminal instead: put `compose.yml` and a `.env` in a folder, then run `docker compose up -d`.
+
+To build from source on the server instead of pulling the image, swap `image:` for the `build:` line in `compose.yml` and run `docker compose up -d --build`.
+
+**Option B: Unraid template**
+1. Copy `unraid/bants-server.xml` to `/boot/config/plugins/dockerMan/templates-user/` on your Unraid flash drive.
+2. In **Docker → Add Container**, choose **bants-server** from the Template dropdown.
+3. Set an **Invite code**, then click **Apply**.
 
 Check it's running by opening `http://YOUR-UNRAID-IP:42069/api/health`, which should show `{"ok":true}`.
 
