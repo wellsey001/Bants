@@ -259,6 +259,43 @@ try {
     await bobWs.waitFor((e) => e.type === 'message.new' && e.message.body.includes('Missed voice call'));
   });
 
+  await step('group call: ring everyone, join, mesh signals, leave', async () => {
+    const carolWs = socket(carol.token);
+    await carolWs.waitFor((e) => e.type === 'ready');
+    const g = await api('POST', '/api/conversations', { token: alice.token, body: { type: 'group', name: 'Call gang', memberIds: [bob.user.id, carol.user.id] } });
+    aliceWs.json({ type: 'call.start', conversationId: g.data.id, video: true });
+    const started = await aliceWs.waitFor((e) => e.type === 'call.started' && e.call.group);
+    const callId = started.call.id;
+    const bobRing = await bobWs.waitFor((e) => e.type === 'call.incoming' && e.call.id === callId);
+    assert.equal(bobRing.groupName, 'Call gang');
+    await carolWs.waitFor((e) => e.type === 'call.incoming' && e.call.id === callId);
+
+    bobWs.json({ type: 'call.accept', callId });
+    const bobJoined = await bobWs.waitFor((e) => e.type === 'call.joined' && e.call.id === callId);
+    assert.deepEqual(bobJoined.participants.map((p) => p.id), [alice.user.id]);
+    const aliceSees = await aliceWs.waitFor((e) => e.type === 'call.participant.joined' && e.user.id === bob.user.id);
+    assert.equal(aliceSees.call.participants.length, 2);
+
+    // Pressing call again in the group joins the call that's already going.
+    carolWs.json({ type: 'call.start', conversationId: g.data.id, video: true });
+    const carolJoined = await carolWs.waitFor((e) => e.type === 'call.joined' && e.call.id === callId);
+    assert.equal(carolJoined.participants.length, 2);
+
+    // Signals go to one named person, tagged with who sent them.
+    carolWs.json({ type: 'call.signal', callId, to: bob.user.id, data: { type: 'offer', sdp: 'carol-offer' } });
+    const sig = await bobWs.waitFor((e) => e.type === 'call.signal' && e.data.sdp === 'carol-offer');
+    assert.equal(sig.from, carol.user.id);
+
+    carolWs.json({ type: 'call.end', callId });
+    await aliceWs.waitFor((e) => e.type === 'call.participant.left' && e.userId === carol.user.id);
+    bobWs.json({ type: 'call.end', callId });
+    const ended = await aliceWs.waitFor((e) => e.type === 'call.ended' && e.callId === callId);
+    assert.equal(ended.reason, 'hangup', 'last one left alone ends the call');
+    const log = await aliceWs.waitFor((e) => e.type === 'message.new' && e.message.body.includes('Group video call'));
+    assert.match(log.message.body, /Group video call · 0:0\d/);
+    carolWs.close();
+  });
+
   await step('pin, archive and search', async () => {
     let c = await api('PATCH', `/api/conversations/${convId}`, { token: bob.token, body: { pinned: true, archived: true } });
     assert.equal(c.data.pinned, true);
