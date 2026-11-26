@@ -1041,7 +1041,7 @@ route('POST', '/api/conversations/:id/gif', async ({ user, params, body }) => {
     throw bad('Couldn’t get that GIF');
   }
   const mediaId = saveMediaBuffer(gif.body, gif.mime, 'gif.gif', user.id);
-  return sendMessage(user.id, convId, { clientId, media: mediaId, replyTo: body.replyTo }).message;
+  return sendMessage(user.id, convId, { clientId, media: mediaId, replyTo: body.replyTo, body: typeof body.body === 'string' ? body.body : '' }).message;
 });
 
 // ── admin ──
