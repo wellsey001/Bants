@@ -132,12 +132,13 @@ Friend codes ignore case, spaces and dashes, so `k7qx m2pa` works. Online status
 | `POST /api/conversations/:id/messages` | `{ clientId, body?, media?, replyTo? }` |
 | `PATCH /api/messages/:id` | `{ body }`. Edits work for 15 minutes on text messages only. |
 | `DELETE /api/messages/:id` | Delete for everyone |
+| `POST /api/messages/:id/react` | `{ emoji }`. Each person can have one reaction per message; sending the same emoji again removes it. |
 | `POST /api/conversations/:id/receipts` | `{ delivered?: messageId, read?: messageId }` |
 | `GET /api/sync?since=ID` | Everything new across all chats. Call this after reconnecting. |
 
 `clientId` is a random ID the app generates, such as a UUID. If a send is retried with the same `clientId`, the server returns the original message instead of creating a duplicate.
 
-Message object: `{ id, conversationId, senderId, clientId, kind: text|image|video|audio|file|system, body, media, replyTo, createdAt, editedAt, deleted }`.
+Message object: `{ id, conversationId, senderId, clientId, kind: text|image|video|audio|file|system, body, media, mediaInfo: { mime, size, filename }, replyTo, reactions: [{ emoji, userIds }], createdAt, editedAt, deleted }`.
 
 **Ticks:** each member has `lastDelivered` and `lastRead` message IDs. A message from you is ✓ when the server returns it, ✓✓ when every other member's `lastDelivered` ≥ its ID, and blue ✓✓ when every other member's `lastRead` ≥ its ID.
 

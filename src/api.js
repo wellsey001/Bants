@@ -55,6 +55,16 @@ function meOut(row) {
 }
 
 export function messageOut(m) {
+  let reactions = [];
+  if (!m.deleted) {
+    const grouped = new Map();
+    for (const r of q('SELECT emoji, user_id FROM reactions WHERE message_id = ? ORDER BY created_at').all(m.id)) {
+      if (!grouped.has(r.emoji)) grouped.set(r.emoji, []);
+      grouped.get(r.emoji).push(r.user_id);
+    }
+    reactions = [...grouped].map(([emoji, userIds]) => ({ emoji, userIds }));
+  }
+  const media = !m.deleted && m.media_id ? q('SELECT mime, size, filename FROM media WHERE id = ?').get(m.media_id) : null;
   return {
     id: m.id,
     conversationId: m.conversation_id,
@@ -67,6 +77,8 @@ export function messageOut(m) {
     createdAt: m.created_at,
     editedAt: m.edited_at,
     deleted: !!m.deleted,
+    reactions,
+    mediaInfo: media ? { mime: media.mime, size: media.size, filename: media.filename } : null,
   };
 }
 
@@ -687,7 +699,26 @@ route('DELETE', '/api/messages/:id', ({ user, params }) => {
   const m = q('SELECT * FROM messages WHERE id = ?').get(Number(params.id));
   if (!m || m.sender_id !== user.id) throw notFound('Message not found');
   q('UPDATE messages SET deleted = 1, body = ?, media_id = NULL WHERE id = ?').run('', m.id);
+  q('DELETE FROM reactions WHERE message_id = ?').run(m.id);
   const out = messageOut(q('SELECT * FROM messages WHERE id = ?').get(m.id));
+  sendToConversation(m.conversation_id, { type: 'message.updated', message: out });
+  return out;
+});
+
+/** One reaction per person per message. Sending the same emoji again removes it. */
+route('POST', '/api/messages/:id/react', ({ user, params, body }) => {
+  const m = q('SELECT * FROM messages WHERE id = ?').get(Number(params.id));
+  if (!m || m.deleted || m.kind === 'system') throw notFound('Message not found');
+  requireMember(m.conversation_id, user.id);
+  const emoji = typeof body.emoji === 'string' ? body.emoji.trim() : '';
+  if (!emoji || emoji.length > 16) throw bad('Pick an emoji');
+  const existing = q('SELECT emoji FROM reactions WHERE message_id = ? AND user_id = ?').get(m.id, user.id);
+  if (existing && existing.emoji === emoji) {
+    q('DELETE FROM reactions WHERE message_id = ? AND user_id = ?').run(m.id, user.id);
+  } else {
+    q('INSERT OR REPLACE INTO reactions (message_id, user_id, emoji, created_at) VALUES (?, ?, ?, ?)').run(m.id, user.id, emoji, Date.now());
+  }
+  const out = messageOut(m);
   sendToConversation(m.conversation_id, { type: 'message.updated', message: out });
   return out;
 });

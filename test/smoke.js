@@ -185,6 +185,24 @@ try {
     assert.equal(ev.message.body, '');
   });
 
+  await step('replies, reactions and media details', async () => {
+    const orig = (await api('POST', `/api/conversations/${convId}/messages`, { token: alice.token, body: { body: 'react to me' } })).data;
+    const reply = await api('POST', `/api/conversations/${convId}/messages`, { token: bob.token, body: { body: 'ok', replyTo: orig.id } });
+    assert.equal(reply.data.replyTo, orig.id);
+    let r = await api('POST', `/api/messages/${orig.id}/react`, { token: bob.token, body: { emoji: '😂' } });
+    assert.deepEqual(r.data.reactions, [{ emoji: '😂', userIds: [bob.user.id] }]);
+    const ev = await aliceWs.waitFor((e) => e.type === 'message.updated' && e.message.id === orig.id);
+    assert.equal(ev.message.reactions[0].emoji, '😂');
+    r = await api('POST', `/api/messages/${orig.id}/react`, { token: alice.token, body: { emoji: '😂' } });
+    assert.equal(r.data.reactions[0].userIds.length, 2);
+    r = await api('POST', `/api/messages/${orig.id}/react`, { token: bob.token, body: { emoji: '😂' } });
+    assert.deepEqual(r.data.reactions, [{ emoji: '😂', userIds: [alice.user.id] }], 'same emoji again removes it');
+    const up = await api('POST', '/api/media', { token: alice.token, raw: Buffer.alloc(300, 1), headers: { 'content-type': 'audio/mp4', 'x-filename': 'voice.m4a' } });
+    const voice = await api('POST', `/api/conversations/${convId}/messages`, { token: alice.token, body: { media: up.data.id } });
+    assert.equal(voice.data.kind, 'audio');
+    assert.deepEqual(voice.data.mediaInfo, { mime: 'audio/mp4', size: 300, filename: 'voice.m4a' });
+  });
+
   await step('group chat: create, message, add, leave', async () => {
     // bob and carol need a contact link for later; alice is contacts with both.
     const g = await api('POST', '/api/conversations', { token: alice.token, body: { type: 'group', name: 'Gang', memberIds: [bob.user.id] } });
