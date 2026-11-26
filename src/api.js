@@ -15,7 +15,7 @@ import {
   rateLimited,
 } from './auth.js';
 import { sendToUser, sendToConversation, isOnline, disconnect } from './hub.js';
-import { pushToUser } from './push.js';
+import { pushToUser, pushEnabled } from './push.js';
 import { registrationSettings, setSetting } from './settings.js';
 import { firstUrl, fetchPreview } from './previews.js';
 import { gifsEnabled, findGifs, downloadGif } from './gifs.js';
@@ -435,6 +435,12 @@ route('GET', '/api/server', () => {
     registration: reg.allowRegistration ? (reg.inviteCode ? 'invite' : 'open') : 'closed',
     maxUploadBytes: config.maxUploadBytes,
     gifs: gifsEnabled(),
+    // Handy for checking which version is running and what's switched on.
+    build: (process.env.BANTS_BUILD || 'dev').slice(0, 7),
+    push: pushEnabled(),
+    calls: true,
+    callRelay: !!process.env.TURN_SECRET,
+    unsend: true,
   };
 }, { auth: false });
 

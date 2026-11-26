@@ -1,6 +1,8 @@
 FROM node:22-alpine
 WORKDIR /app
+ARG BUILD=dev
 ENV NODE_ENV=production \
+    BANTS_BUILD=$BUILD \
     PORT=42069 \
     DATA_DIR=/data
 COPY package.json ./
