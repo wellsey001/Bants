@@ -1,0 +1,13 @@
+{
+  "name": "bants-server",
+  "version": "0.1.0",
+  "description": "Self-hosted backend for a WhatsApp-style messaging app",
+  "type": "module",
+  "main": "src/index.js",
+  "engines": { "node": ">=22.5" },
+  "scripts": {
+    "start": "node --disable-warning=ExperimentalWarning src/index.js",
+    "test": "node --disable-warning=ExperimentalWarning test/smoke.js"
+  },
+  "license": "MIT"
+}

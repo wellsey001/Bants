@@ -1,0 +1,15 @@
+# Optional: for running outside Unraid's Docker UI.
+services:
+  bants:
+    image: ghcr.io/wellsey001/bants:latest
+    container_name: bants-server
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    volumes:
+      - /mnt/user/appdata/bants-server:/data
+    environment:
+      INVITE_CODE: "change-me"
+      ALLOW_REGISTRATION: "true"
+      MAX_UPLOAD_MB: "50"
+      # FCM_SERVICE_ACCOUNT: /data/firebase-service-account.json
