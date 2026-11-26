@@ -17,6 +17,7 @@ import {
 } from './api.js';
 import './push.js';
 import { handleCallMessage } from './calls.js';
+import { scheduleBackups } from './backup.js';
 
 const MAX_JSON = 1024 * 1024;
 
@@ -213,6 +214,8 @@ setInterval(() => {
 
 // Big uploads (4K video over a slow connection) can take a while: allow up to 2 hours per request.
 server.requestTimeout = 2 * 60 * 60 * 1000;
+
+scheduleBackups();
 
 server.listen(config.port, () => {
   console.log(`bants-server listening on :${config.port} (data in ${config.dataDir})`);

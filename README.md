@@ -79,6 +79,31 @@ Voice and video calls go straight between the two phones when they can. When the
 
 If your internet provider uses CGNAT (your router's WAN IP doesn't match what whatismyip.com shows), port forwarding won't work, and calls will only connect when the phones can reach each other directly.
 
+## 7. Encrypted backups
+
+Every night (3am by default) Bants saves an encrypted copy of the database and all photos,
+videos and files to `/mnt/user/backups/bants`. Each file is encrypted with AES-256-GCM using
+a key made from your passphrase, so the backups are useless to anyone without it.
+
+1. Add `BACKUP_PASSPHRASE=` with a long passphrase to the stack's `.env`, then **Update Stack**.
+   **Save the passphrase in a password manager.** Lose it and the backups can't be opened.
+2. Check the admin page: **Backups** shows the last run, and **Back up now** runs one straight away.
+3. Ideally put the `backups` share on a different disk from `appdata`, or copy it off the
+   server now and then (it's safe to store anywhere, since it's encrypted).
+
+Media files are only copied once (they never change), so after the first run each night is quick.
+The newest `BACKUP_KEEP` (14) database snapshots are kept.
+
+**Restoring:** stop the stack, then in the Unraid terminal:
+
+```sh
+docker run --rm -it -v /mnt/user/backups/bants:/backups -v /mnt/user/appdata/bants-restored:/restored \
+  ghcr.io/wellsey001/bants:latest node src/restore.js /backups /restored
+```
+
+Enter the passphrase. Add a date (`2026-11-26`) after `/restored` to pick an older snapshot.
+Then point the stack's `/data` volume at `bants-restored` (or swap the folders) and start it again.
+
 ## Admin page
 
 Open `https://your-domain/admin` and log in with your Bants account. The first account made on the server is the admin, and admins can make others admins too.

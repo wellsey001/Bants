@@ -20,4 +20,9 @@ export const config = {
   turnHost: env.TURN_HOST || '',
   turnPort: Number(env.TURN_PORT || 3478),
   trustProxy: (env.TRUST_PROXY || 'true') !== 'false',
+  // Encrypted nightly backups. Both must be set to turn them on.
+  backupDir: env.BACKUP_DIR || '',
+  backupPassphrase: env.BACKUP_PASSPHRASE || '',
+  backupKeep: Math.max(1, Number(env.BACKUP_KEEP || 14)),
+  backupHour: Math.min(23, Math.max(0, Number(env.BACKUP_HOUR ?? 3))),
 };

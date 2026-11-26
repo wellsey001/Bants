@@ -137,9 +137,22 @@ async function load() {
     ['People', o.users], ['Chats', o.conversations], ['Messages', o.messages],
     ['Files', `${o.mediaFiles} · ${size(o.mediaBytes)}`], ['Database', size(o.dbBytes)],
     ['Push', o.push ? 'On' : 'Off'], ['GIFs', o.gifs ? 'On' : 'Off'], ['Call relay', o.callRelay ? 'On' : 'Off'],
+    ['Backups', !o.backup?.enabled ? 'Off' : o.backup.lastError ? 'Failed' : o.backup.lastAt ? `Last ${when(o.backup.lastAt)}` : 'On, none yet'],
   ];
   $('stats').replaceChildren(...stats.map(([label, value]) =>
     el('div', { className: 'card stat' }, el('div', { className: 'label', textContent: label }), el('div', { className: 'big', textContent: String(value) }))));
+  if (o.backup?.enabled) {
+    const btn = el('button', { className: 'small', type: 'button', textContent: o.backup.running ? 'Backing up…' : 'Back up now', disabled: o.backup.running });
+    btn.onclick = async () => {
+      btn.disabled = true;
+      btn.textContent = 'Backing up…';
+      try { await api('POST', '/api/admin/backup'); } catch (e) { alert(e.message); }
+      load();
+    };
+    const card = el('div', { className: 'card stat' }, el('div', { className: 'label', textContent: 'Encrypted backup' }), btn);
+    if (o.backup.lastError) card.append(el('div', { className: 'label', textContent: o.backup.lastError }));
+    $('stats').append(card);
+  }
   $('allow').checked = o.allowRegistration;
   $('invite').value = o.inviteCode;
 

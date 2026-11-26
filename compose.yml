@@ -15,6 +15,8 @@ services:
       - "42069:42069"
     volumes:
       - /mnt/user/appdata/bants-server:/data
+      # Encrypted backups. Point this at a different share (ideally a different disk) to appdata.
+      - /mnt/user/backups/bants:/backups
     environment:
       PORT: "42069"
       DATA_DIR: /data
@@ -26,6 +28,12 @@ services:
       TURN_SECRET: ${TURN_SECRET:-}
       TURN_HOST: ${TURN_HOST:-}
       GIF_RATING: ${GIF_RATING:-r}
+      # Nightly encrypted backups: set a long passphrase in the stack's .env and keep a copy
+      # somewhere safe. Without it the backups can't be opened.
+      BACKUP_DIR: /backups
+      BACKUP_PASSPHRASE: ${BACKUP_PASSPHRASE:-}
+      BACKUP_KEEP: ${BACKUP_KEEP:-14}
+      BACKUP_HOUR: ${BACKUP_HOUR:-3}
       TZ: Europe/London
     labels:
       net.unraid.docker.icon: https://raw.githubusercontent.com/wellsey001/Bants/main/assets/icon.png

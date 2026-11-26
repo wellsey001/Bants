@@ -20,6 +20,9 @@
   <Config Name="FCM service account" Target="FCM_SERVICE_ACCOUNT" Default="" Mode="" Description="Path inside the container to your Firebase service-account JSON, e.g. /data/firebase-service-account.json. Leave blank to disable push." Type="Variable" Display="advanced" Required="false" Mask="false"></Config>
   <Config Name="Giphy API key" Target="GIPHY_API_KEY" Default="" Mode="" Description="Free key from developers.giphy.com. Turns on GIF search." Type="Variable" Display="always" Required="false" Mask="true"></Config>
   <Config Name="GIF rating" Target="GIF_RATING" Default="r" Mode="" Description="Giphy content rating: g, pg, pg-13 or r." Type="Variable" Display="advanced" Required="false" Mask="false">r</Config>
+  <Config Name="Backups folder" Target="/backups" Default="/mnt/user/backups/bants" Mode="rw" Description="Where encrypted nightly backups go. Ideally a different disk to appdata." Type="Path" Display="always" Required="false" Mask="false">/mnt/user/backups/bants</Config>
+  <Config Name="Backup folder (inside container)" Target="BACKUP_DIR" Default="/backups" Mode="" Description="Leave as /backups." Type="Variable" Display="advanced" Required="false" Mask="false">/backups</Config>
+  <Config Name="Backup passphrase" Target="BACKUP_PASSPHRASE" Default="" Mode="" Description="Turns on encrypted nightly backups. Use a long passphrase and keep a copy somewhere safe: without it, backups can't be restored." Type="Variable" Display="always" Required="false" Mask="true"></Config>
   <Config Name="TURN secret" Target="TURN_SECRET" Default="" Mode="" Description="Shared secret with the coturn container, for calls. See the README." Type="Variable" Display="always" Required="false" Mask="true"></Config>
   <Config Name="TURN host" Target="TURN_HOST" Default="" Mode="" Description="Public hostname for coturn, e.g. turn.yourdomain.com (DNS only, not proxied)." Type="Variable" Display="always" Required="false" Mask="false"></Config>
 </Container>

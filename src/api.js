@@ -16,6 +16,7 @@ import {
 } from './auth.js';
 import { sendToUser, sendToConversation, isOnline, disconnect } from './hub.js';
 import { pushToUser, pushEnabled } from './push.js';
+import { backupStatus, runBackup } from './backup.js';
 import { registrationSettings, setSetting } from './settings.js';
 import { firstUrl, fetchPreview } from './previews.js';
 import { gifsEnabled, findGifs, downloadGif } from './gifs.js';
@@ -408,17 +409,14 @@ export function sendMessage(userId, convId, input) {
   for (const o of others) {
     const mentioned = mentions.includes(o.user_id);
     if ((o.muted && !mentioned) || isOnline(o.user_id)) continue;
+    // Only ids go through Google's push service: the phone fetches the message itself from this
+    // server before showing the notification, so no message text or names pass through Google.
     pushToUser(o.user_id, {
       mentioned: mentioned ? '1' : '0',
       type: 'message',
       conversationId: convId,
-      conversationType: conv.type,
-      conversationName: conv.name || '',
       messageId: message.id,
       senderId: userId,
-      senderName: sender.display_name,
-      kind,
-      body: body.slice(0, 200),
     }).catch(() => {});
   }
 
@@ -1228,8 +1226,18 @@ route('GET', '/api/admin/overview', ({ user }) => {
     push: !!config.fcmServiceAccount,
     gifs: gifsEnabled(),
     callRelay: !!(config.turnSecret && config.turnHost),
+    backup: backupStatus(),
     ...registrationSettings(),
   };
+});
+
+route('POST', '/api/admin/backup', async ({ user }) => {
+  requireServerAdmin(user);
+  try {
+    return await runBackup();
+  } catch (e) {
+    throw bad(e.message);
+  }
 });
 
 route('GET', '/api/admin/users', ({ user }) => {
