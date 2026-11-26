@@ -25,14 +25,14 @@ Self-hosted backend for **Bants**, a WhatsApp-style messaging app. It runs as on
 
 **Option B: compose.** If you use the Compose Manager plugin, use `docker-compose.yml`.
 
-Check it's running by opening `http://YOUR-UNRAID-IP:8080/api/health`, which should show `{"ok":true}`.
+Check it's running by opening `http://YOUR-UNRAID-IP:42069/api/health`, which should show `{"ok":true}`.
 
 Data is stored in `/mnt/user/appdata/bants-server`, which holds the database and a `media/` folder. Include it in your appdata backups.
 
 ## 3. Make it reachable outside your home (Cloudflare Tunnel)
 
 1. In Cloudflare Zero Trust, go to **Networks → Tunnels** and create a tunnel. Install the `cloudflared` container on Unraid using the token it gives you.
-2. Add a **Public hostname**, for example `chat.yourdomain.com`, pointing to **Service: HTTP**, `YOUR-UNRAID-IP:8080`.
+2. Add a **Public hostname**, for example `chat.yourdomain.com`, pointing to **Service: HTTP**, `YOUR-UNRAID-IP:42069`.
 3. WebSockets work through tunnels by default. The app then uses `https://chat.yourdomain.com` and `wss://chat.yourdomain.com/ws`.
 
 ## 4. Push notifications (optional, do this once the app exists)
@@ -48,7 +48,7 @@ The server only sends a push when the user has no live WebSocket connection, whi
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `PORT` | `8080` | Port to listen on |
+| `PORT` | `42069` | Port to listen on |
 | `DATA_DIR` | `/data` | Database and media location |
 | `INVITE_CODE` | *(blank)* | If set, required to register |
 | `ALLOW_REGISTRATION` | `true` | `false` closes sign-ups |

@@ -1,7 +1,7 @@
 const env = process.env;
 
 export const config = {
-  port: Number(env.PORT || 8080),
+  port: Number(env.PORT || 42069),
   dataDir: env.DATA_DIR || './data',
   // If set, new accounts must supply this code to register (keeps your server private).
   inviteCode: env.INVITE_CODE || '',
