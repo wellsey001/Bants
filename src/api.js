@@ -231,10 +231,16 @@ export function addCallMessage(convId, body) {
   sendToConversation(convId, { type: 'message.new', message: messageOut(msg) });
 }
 
+/**
+ * Message ids must never be reused, or a phone could mistake a new message for one that was
+ * unsent (SQLite would otherwise hand out the id of a deleted newest message again).
+ */
+const NEXT_MESSAGE_ID = `(SELECT MAX(v) FROM (SELECT COALESCE(MAX(id), 0) AS v FROM messages UNION ALL SELECT COALESCE(MAX(message_id), 0) FROM unsent)) + 1`;
+
 function insertSystemMessage(convId, body) {
   const now = Date.now();
   const { lastInsertRowid } = q(
-    `INSERT INTO messages (conversation_id, sender_id, kind, body, created_at) VALUES (?, NULL, 'system', ?, ?)`,
+    `INSERT INTO messages (id, conversation_id, sender_id, kind, body, created_at) VALUES (${NEXT_MESSAGE_ID}, ?, NULL, 'system', ?, ?)`,
   ).run(convId, body, now);
   q('UPDATE conversations SET updated_at = ? WHERE id = ?').run(now, convId);
   return q('SELECT * FROM messages WHERE id = ?').get(Number(lastInsertRowid));
@@ -313,8 +319,8 @@ export function sendMessage(userId, convId, input) {
   const expiresAt = conv.disappear_after > 0 ? now + conv.disappear_after * 1000 : null;
   const row = tx(() => {
     const { lastInsertRowid } = q(
-      `INSERT INTO messages (conversation_id, sender_id, client_id, kind, body, media_id, reply_to, created_at, meta, expires_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO messages (id, conversation_id, sender_id, client_id, kind, body, media_id, reply_to, created_at, meta, expires_at)
+       VALUES (${NEXT_MESSAGE_ID}, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     ).run(convId, userId, clientId, kind, body, media ? media.id : null, replyTo, now, meta ? JSON.stringify(meta) : null, expiresAt);
     const id = Number(lastInsertRowid);
     q('UPDATE conversations SET updated_at = ? WHERE id = ?').run(now, convId);
@@ -820,7 +826,14 @@ route('GET', '/api/conversations/:id/messages', ({ user, params, query }) => {
     const before = query.before ? Number(query.before) : Number.MAX_SAFE_INTEGER;
     rows = q('SELECT * FROM messages WHERE conversation_id = ? AND id < ? ORDER BY id DESC LIMIT ?').all(id, before, limit).reverse();
   }
-  return { messages: rows.map(messageOut), hasMore: rows.length === limit };
+  const out = { messages: rows.map(messageOut), hasMore: rows.length === limit };
+  // Catching up: also say which messages the phone may have cached that were unsent since.
+  if (query.after && query.knownFrom !== undefined) {
+    out.removed = q('SELECT message_id FROM unsent WHERE conversation_id = ? AND message_id >= ? AND message_id <= ? LIMIT 2000')
+      .all(id, Number(query.knownFrom) || 0, Number(query.after))
+      .map((r) => r.message_id);
+  }
+  return out;
 });
 
 route('POST', '/api/conversations/:id/messages', ({ user, params, body }) => sendMessage(user.id, Number(params.id), body).message);
@@ -838,14 +851,30 @@ route('PATCH', '/api/messages/:id', ({ user, params, body }) => {
   return out;
 });
 
+/**
+ * Unsend: removes the message for everyone, with no "deleted" placeholder left behind.
+ * The text, attachment and link preview are wiped from the server; only the id is kept,
+ * so phones that were offline remove it when they catch up.
+ */
 route('DELETE', '/api/messages/:id', ({ user, params }) => {
   const m = q('SELECT * FROM messages WHERE id = ?').get(Number(params.id));
-  if (!m || m.sender_id !== user.id) throw notFound('Message not found');
-  q('UPDATE messages SET deleted = 1, body = ?, media_id = NULL, meta = NULL WHERE id = ?').run('', m.id);
-  q('DELETE FROM reactions WHERE message_id = ?').run(m.id);
-  const out = messageOut(q('SELECT * FROM messages WHERE id = ?').get(m.id));
-  sendToConversation(m.conversation_id, { type: 'message.updated', message: out });
-  return out;
+  if (!m || m.sender_id !== user.id || m.kind === 'system') throw notFound('Message not found');
+  tx(() => {
+    q('DELETE FROM messages WHERE id = ?').run(m.id); // reactions go with it
+    q('INSERT OR REPLACE INTO unsent (message_id, conversation_id, at) VALUES (?, ?, ?)').run(m.id, m.conversation_id, Date.now());
+  });
+  deleteMediaIfUnused(m.media_id);
+  const img = parseMeta(m.meta)?.preview?.image;
+  if (img) deleteMediaIfUnused(img);
+
+  sendToConversation(m.conversation_id, { type: 'message.removed', conversationId: m.conversation_id, ids: [m.id], unsent: true });
+  // Phones that aren't connected may be showing it in a notification: tell them to take it down.
+  const others = q('SELECT user_id FROM members WHERE conversation_id = ? AND user_id != ?').all(m.conversation_id, user.id);
+  for (const o of others) {
+    if (isOnline(o.user_id)) continue;
+    pushToUser(o.user_id, { type: 'unsend', conversationId: m.conversation_id, messageId: m.id }).catch(() => {});
+  }
+  return { ok: true, id: m.id };
 });
 
 /** One reaction per person per message. Sending the same emoji again removes it. */

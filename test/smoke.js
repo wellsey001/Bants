@@ -174,15 +174,21 @@ try {
     assert.equal(denied.status, 404, 'non-members cannot fetch media');
   });
 
-  await step('edit and delete a message', async () => {
+  await step('edit and unsend a message', async () => {
     const m = (await api('POST', `/api/conversations/${convId}/messages`, { token: alice.token, body: { body: 'typo' } })).data;
     const e = await api('PATCH', `/api/messages/${m.id}`, { token: alice.token, body: { body: 'fixed' } });
     assert.equal(e.data.body, 'fixed');
     assert.ok(e.data.editedAt);
+    const bobDenied = await api('DELETE', `/api/messages/${m.id}`, { token: bob.token });
+    assert.equal(bobDenied.status, 404, 'only the sender can unsend');
     const d = await api('DELETE', `/api/messages/${m.id}`, { token: alice.token });
-    assert.equal(d.data.deleted, true);
-    const ev = await bobWs.waitFor((x) => x.type === 'message.updated' && x.message.id === m.id && x.message.deleted);
-    assert.equal(ev.message.body, '');
+    assert.equal(d.data.ok, true);
+    const ev = await bobWs.waitFor((x) => x.type === 'message.removed' && x.ids.includes(m.id));
+    assert.equal(ev.unsent, true);
+    const list = await api('GET', `/api/conversations/${convId}/messages?limit=200`, { token: bob.token });
+    assert.ok(!list.data.messages.some((x) => x.id === m.id), 'unsent message is gone from history');
+    const catchUp = await api('GET', `/api/conversations/${convId}/messages?after=${m.id}&knownFrom=1`, { token: bob.token });
+    assert.deepEqual(catchUp.data.removed, [m.id], 'offline phones learn what was unsent');
   });
 
   await step('replies, reactions and media details', async () => {

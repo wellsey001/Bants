@@ -175,6 +175,13 @@ if (db.prepare('PRAGMA user_version').get().user_version < 1) {
   db.exec('PRAGMA user_version = 1');
 }
 db.exec('CREATE INDEX IF NOT EXISTS idx_messages_expiry ON messages(expires_at) WHERE expires_at IS NOT NULL');
+// Messages their sender unsent. Kept (ids only, no content) so phones that were offline remove them too.
+db.exec(`CREATE TABLE IF NOT EXISTS unsent (
+  message_id      INTEGER PRIMARY KEY,
+  conversation_id INTEGER NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+  at              INTEGER NOT NULL
+)`);
+db.exec('CREATE INDEX IF NOT EXISTS idx_unsent_conv ON unsent(conversation_id, message_id)');
 
 // The first account on the server runs it.
 if (!db.prepare('SELECT 1 FROM users WHERE is_admin = 1').get()) {

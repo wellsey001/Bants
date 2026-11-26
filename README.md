@@ -174,7 +174,7 @@ Friend codes ignore case, spaces and dashes, so `k7qx m2pa` works. Online status
 | `GET /api/conversations/:id/messages?after=ID` | Newer messages |
 | `POST /api/conversations/:id/messages` | `{ clientId, body?, media?, replyTo? }` |
 | `PATCH /api/messages/:id` | `{ body }`. Edits work for 15 minutes on text messages only. |
-| `DELETE /api/messages/:id` | Delete for everyone |
+| `DELETE /api/messages/:id` | Unsend: removes your message for everyone, leaving no placeholder. Its text and attachment are wiped from the server. Connected phones get `message.removed` (with `unsent: true`); offline ones get an `unsend` push to clear any notification, and `GET …/messages?after=…&knownFrom=…` returns `removed` ids when they catch up. |
 | `POST /api/messages/:id/react` | `{ emoji }`. Each person can have one reaction per message; sending the same emoji again removes it. |
 | `POST /api/conversations/:id/receipts` | `{ delivered?: messageId, read?: messageId }` |
 | `GET /api/sync?since=ID` | Everything new across all chats. Call this after reconnecting. |
