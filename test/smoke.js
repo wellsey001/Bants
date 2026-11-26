@@ -10,7 +10,7 @@ const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'msgr-'));
 const base = `http://127.0.0.1:${port}`;
 
 const server = spawn(process.execPath, ['--disable-warning=ExperimentalWarning', 'src/index.js'], {
-  env: { ...process.env, PORT: String(port), DATA_DIR: dataDir, INVITE_CODE: 'letmein', SWEEP_INTERVAL_MS: '300', REGISTER_LIMIT: '50', GIPHY_API_KEY: '' },
+  env: { ...process.env, PORT: String(port), DATA_DIR: dataDir, INVITE_CODE: 'letmein', SWEEP_INTERVAL_MS: '300', REGISTER_LIMIT: '50', TURN_SECRET: 'turnsecret', TURN_HOST: 'turn.example.com', GIPHY_API_KEY: '' },
   stdio: ['ignore', 'pipe', 'inherit'],
 });
 await new Promise((resolve) => server.stdout.on('data', (d) => String(d).includes('listening') && resolve()));
@@ -201,6 +201,56 @@ try {
     const voice = await api('POST', `/api/conversations/${convId}/messages`, { token: alice.token, body: { media: up.data.id } });
     assert.equal(voice.data.kind, 'audio');
     assert.deepEqual(voice.data.mediaInfo, { mime: 'audio/mp4', size: 300, filename: 'voice.m4a' });
+  });
+
+  await step('voice call: ring, answer, relay signals, hang up', async () => {
+    const ice = await api('GET', '/api/calls/ice', { token: alice.token });
+    const turn = ice.data.iceServers.find((s) => s.username);
+    assert.ok(turn.urls[0].startsWith('turn:turn.example.com:3478'));
+    const crypto = await import('node:crypto');
+    assert.equal(turn.credential, crypto.createHmac('sha1', 'turnsecret').update(turn.username).digest('base64'));
+
+    aliceWs.json({ type: 'call.start', conversationId: convId, video: false });
+    const started = await aliceWs.waitFor((e) => e.type === 'call.started');
+    const incoming = await bobWs.waitFor((e) => e.type === 'call.incoming');
+    assert.equal(incoming.call.id, started.call.id);
+    assert.equal(incoming.caller.displayName, 'Alice');
+    const peek = await api('GET', `/api/calls/${started.call.id}`, { token: bob.token });
+    assert.equal(peek.data.call.state, 'ringing');
+
+    bobWs.json({ type: 'call.accept', callId: started.call.id });
+    await aliceWs.waitFor((e) => e.type === 'call.accepted');
+    aliceWs.json({ type: 'call.signal', callId: started.call.id, data: { sdp: 'offer', type: 'offer' } });
+    const offer = await bobWs.waitFor((e) => e.type === 'call.signal');
+    assert.equal(offer.data.sdp, 'offer');
+    bobWs.json({ type: 'call.signal', callId: started.call.id, data: { sdp: 'answer', type: 'answer' } });
+    assert.equal((await aliceWs.waitFor((e) => e.type === 'call.signal')).data.type, 'answer');
+
+    aliceWs.json({ type: 'call.start', conversationId: convId, video: true });
+    const err = await aliceWs.waitFor((e) => e.type === 'error');
+    assert.match(err.error, /already on a call/);
+
+    bobWs.json({ type: 'call.end', callId: started.call.id });
+    const ended = await aliceWs.waitFor((e) => e.type === 'call.ended');
+    assert.equal(ended.reason, 'hangup');
+    const log = await aliceWs.waitFor((e) => e.type === 'message.new' && e.message.kind === 'system' && e.message.body.includes('Voice call'));
+    assert.match(log.message.body, /Voice call · 0:0\d/);
+  });
+
+  await step('video call: declined and missed', async () => {
+    aliceWs.json({ type: 'call.start', conversationId: convId, video: true });
+    const started = await aliceWs.waitFor((e) => e.type === 'call.started');
+    await bobWs.waitFor((e) => e.type === 'call.incoming');
+    bobWs.json({ type: 'call.decline', callId: started.call.id });
+    assert.equal((await aliceWs.waitFor((e) => e.type === 'call.ended' && e.callId === started.call.id)).reason, 'declined');
+    await aliceWs.waitFor((e) => e.type === 'message.new' && e.message.body.includes('Video call declined'));
+
+    aliceWs.json({ type: 'call.start', conversationId: convId, video: false });
+    const s2 = await aliceWs.waitFor((e) => e.type === 'call.started');
+    await bobWs.waitFor((e) => e.type === 'call.incoming');
+    aliceWs.json({ type: 'call.end', callId: s2.call.id });
+    assert.equal((await bobWs.waitFor((e) => e.type === 'call.ended' && e.callId === s2.call.id)).reason, 'cancelled');
+    await bobWs.waitFor((e) => e.type === 'message.new' && e.message.body.includes('Missed voice call'));
   });
 
   await step('pin, archive and search', async () => {

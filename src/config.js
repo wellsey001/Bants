@@ -15,5 +15,9 @@ export const config = {
   giphyKey: env.GIPHY_API_KEY || '',
   // Giphy content rating: g, pg, pg-13 or r.
   gifRating: env.GIF_RATING || 'r',
+  // Calls: coturn's shared secret and public hostname. Without these, calls use public STUN only.
+  turnSecret: env.TURN_SECRET || '',
+  turnHost: env.TURN_HOST || '',
+  turnPort: Number(env.TURN_PORT || 3478),
   trustProxy: (env.TRUST_PROXY || 'true') !== 'false',
 };

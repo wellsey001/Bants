@@ -31,6 +31,21 @@ export function sendToUser(userId, event, exceptTokenHash = null) {
   for (const entry of set) if (entry.tokenHash !== exceptTokenHash) entry.conn.send(payload);
 }
 
+/** Sends to one signed-in device (session) of a user. */
+export function sendToSession(userId, tokenHash, event) {
+  const set = connections.get(userId);
+  if (!set) return false;
+  const payload = JSON.stringify(event);
+  let sent = false;
+  for (const entry of set) {
+    if (entry.tokenHash === tokenHash) {
+      entry.conn.send(payload);
+      sent = true;
+    }
+  }
+  return sent;
+}
+
 export function sendToConversation(conversationId, event, { exceptUserId = null } = {}) {
   const rows = q('SELECT user_id FROM members WHERE conversation_id = ?').all(conversationId);
   for (const { user_id } of rows) if (user_id !== exceptUserId) sendToUser(user_id, event);

@@ -136,7 +136,7 @@ async function load() {
   const stats = [
     ['People', o.users], ['Chats', o.conversations], ['Messages', o.messages],
     ['Files', `${o.mediaFiles} · ${size(o.mediaBytes)}`], ['Database', size(o.dbBytes)],
-    ['Push', o.push ? 'On' : 'Off'], ['GIFs', o.gifs ? 'On' : 'Off'],
+    ['Push', o.push ? 'On' : 'Off'], ['GIFs', o.gifs ? 'On' : 'Off'], ['Call relay', o.callRelay ? 'On' : 'Off'],
   ];
   $('stats').replaceChildren(...stats.map(([label, value]) =>
     el('div', { className: 'card stat' }, el('div', { className: 'label', textContent: label }), el('div', { className: 'big', textContent: String(value) }))));

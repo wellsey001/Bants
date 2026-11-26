@@ -16,6 +16,7 @@ import {
   sweepExpired,
 } from './api.js';
 import './push.js';
+import { handleCallMessage } from './calls.js';
 
 const MAX_JSON = 1024 * 1024;
 
@@ -165,6 +166,11 @@ server.on('upgrade', (req, socket, head) => {
           break;
         }
         default:
+          if (typeof msg.type === 'string' && msg.type.startsWith('call.')) {
+            const reply = handleCallMessage(userId, session.tokenHash, msg);
+            if (reply) conn.send(reply);
+            break;
+          }
           conn.send({ type: 'error', error: `Unknown event type: ${msg.type}` });
       }
     } catch (err) {

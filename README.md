@@ -60,6 +60,25 @@ The server only sends a push when the user has no live WebSocket connection, whi
 
 The server talks to Giphy for the phones, so the key never leaves Unraid. Set `GIF_RATING` to `g`, `pg` or `pg-13` if `r` is too much.
 
+## 6. Calls
+
+Voice and video calls go straight between the two phones when they can. When they can't (very common on mobile data), the audio and video is relayed through **coturn**, which runs next to Bants in the same compose stack. Cloudflare Tunnel can't carry it, so it needs its own way in:
+
+1. **Make a secret.** In the Unraid terminal run `openssl rand -hex 32` and copy the result.
+2. **Add a DNS record.** In Cloudflare, add an `A` record named `turn` pointing at your home's public IP, with **Proxy status: DNS only** (grey cloud). If your home IP changes, run a DDNS updater (for example the `favonia/cloudflare-ddns` container) to keep it current.
+3. **Forward ports on your router** to your Unraid server's LAN IP:
+   - `3478` UDP and TCP
+   - `49160–49200` UDP
+4. **Update the stack.** Paste the latest `compose.yml` (it now includes the `coturn` service), then add to the stack's ENV:
+   ```
+   TURN_SECRET=the-secret-from-step-1
+   TURN_HOST=turn.yourdomain.com
+   ```
+   Click **Update Stack**.
+5. **Check it.** The admin page should show **Call relay: On**.
+
+If your internet provider uses CGNAT (your router's WAN IP doesn't match what whatismyip.com shows), port forwarding won't work, and calls will only connect when the phones can reach each other directly.
+
 ## Admin page
 
 Open `https://your-domain/admin` and log in with your Bants account. The first account made on the server is the admin, and admins can make others admins too.
@@ -83,6 +102,9 @@ From the admin page you can:
 | `FCM_SERVICE_ACCOUNT` | *(blank)* | Firebase JSON path; push is off if blank |
 | `GIPHY_API_KEY` | *(blank)* | Giphy key; GIF search is off if blank |
 | `GIF_RATING` | `r` | Giphy rating: `g`, `pg`, `pg-13` or `r` |
+| `TURN_SECRET` | *(blank)* | Shared secret with coturn, for calls |
+| `TURN_HOST` | *(blank)* | Public hostname for coturn, e.g. `turn.yourdomain.com` |
+| `TURN_PORT` | `3478` | coturn's port |
 | `TRUST_PROXY` | `true` | Read real client IPs from Cloudflare headers |
 | `LOG_REQUESTS` | `false` | Log every HTTP request |
 
@@ -90,7 +112,7 @@ From the admin page you can:
 
 ```
 npm start          # needs Node 22.5+
-npm test           # spins up a temp server and runs 26 end-to-end checks
+npm test           # spins up a temp server and runs 28 end-to-end checks
 ```
 
 ---
@@ -208,5 +230,17 @@ You can use an `Authorization` header instead of the query string. The server se
 { "type": "receipt", "conversationId": 1, "delivered": 42, "read": 42 }
 { "type": "ping" }
 ```
+
+### Calls (1:1, over the same WebSocket)
+
+| App → server | Server → app |
+|---|---|
+| `call.start { conversationId, video }` | `call.started { call }` to the caller; `call.incoming { call, caller }` to the other person (plus a push with `type: "call"`) |
+| `call.accept { callId }` | `call.accepted { call }` to the caller; `call.joined` back; other ringing phones get `call.ended { reason: "answered_elsewhere" }` |
+| `call.decline { callId }` | `call.ended { reason: "declined" }` |
+| `call.end { callId }` | `call.ended { reason: "hangup" \| "cancelled" }` |
+| `call.signal { callId, data }` | `call.signal { callId, data }` relayed to the other phone (SDP offers/answers and ICE candidates) |
+
+Unanswered calls end after 40 seconds (`reason: "missed"`). Every call leaves a line in the chat ("📞 Voice call · 3:12", "Missed video call"). `GET /api/calls/ice` gives STUN/TURN servers with 12-hour coturn credentials; `GET /api/calls/:id` checks whether a call is still ringing.
 
 **Push payload** (FCM data message): `type: "message"` with `conversationId, conversationType, conversationName, messageId, senderId, senderName, kind, body`, or `type: "contact_request"` or `type: "contact_accepted"`.

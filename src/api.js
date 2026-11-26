@@ -225,6 +225,12 @@ function getOrCreateDirect(a, b) {
   return { id, created: true };
 }
 
+/** Adds a call-history line (e.g. "Missed voice call") to a chat and shows it to everyone. */
+export function addCallMessage(convId, body) {
+  const msg = insertSystemMessage(convId, body);
+  sendToConversation(convId, { type: 'message.new', message: messageOut(msg) });
+}
+
 function insertSystemMessage(convId, body) {
   const now = Date.now();
   const { lastInsertRowid } = q(
@@ -1024,6 +1030,7 @@ route('GET', '/api/admin/overview', ({ user }) => {
     dbBytes,
     push: !!config.fcmServiceAccount,
     gifs: gifsEnabled(),
+    callRelay: !!(config.turnSecret && config.turnHost),
     ...registrationSettings(),
   };
 });
@@ -1094,4 +1101,4 @@ route('GET', '/admin', ({ res }) => {
   res.end(html);
 }, { auth: false });
 
-export { getUser, conversationOut };
+export { getUser, conversationOut, isBlocked };
