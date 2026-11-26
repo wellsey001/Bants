@@ -211,6 +211,9 @@ setInterval(() => {
   }
 }, 30_000).unref();
 
+// Big uploads (4K video over a slow connection) can take a while: allow up to 2 hours per request.
+server.requestTimeout = 2 * 60 * 60 * 1000;
+
 server.listen(config.port, () => {
   console.log(`bants-server listening on :${config.port} (data in ${config.dataDir})`);
   const mode = config.allowRegistration ? (config.inviteCode ? 'invite code required' : 'open') : 'closed';

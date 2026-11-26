@@ -98,7 +98,7 @@ From the admin page you can:
 | `DATA_DIR` | `/data` | Database and media location |
 | `INVITE_CODE` | *(blank)* | If set, required to register |
 | `ALLOW_REGISTRATION` | `true` | `false` closes sign-ups |
-| `MAX_UPLOAD_MB` | `50` | Upload size limit |
+| `MAX_UPLOAD_MB` | `2048` | Upload size limit. Original-quality 4K video is about 300–400 MB a minute. If you use a reverse proxy, its body size limit must be at least this big. |
 | `FCM_SERVICE_ACCOUNT` | *(blank)* | Firebase JSON path; push is off if blank |
 | `GIPHY_API_KEY` | *(blank)* | Giphy key; GIF search is off if blank |
 | `GIF_RATING` | `r` | Giphy rating: `g`, `pg`, `pg-13` or `r` |
