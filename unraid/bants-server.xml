@@ -11,11 +11,13 @@
   <Overview>Self-hosted backend for a WhatsApp-style messaging app: accounts, friend codes, chats, groups, media and push notifications.</Overview>
   <Category>Network:Messenger</Category>
   <Icon>https://raw.githubusercontent.com/wellsey001/Bants/main/assets/icon.png</Icon>
-  <WebUI>http://[IP]:[PORT:42069]/api/health</WebUI>
+  <WebUI>http://[IP]:[PORT:42069]/admin</WebUI>
   <Config Name="Port" Target="42069" Default="42069" Mode="tcp" Description="API and WebSocket port" Type="Port" Display="always" Required="true" Mask="false">42069</Config>
   <Config Name="Data" Target="/data" Default="/mnt/user/appdata/bants-server" Mode="rw" Description="Database and uploaded media" Type="Path" Display="always" Required="true" Mask="false">/mnt/user/appdata/bants-server</Config>
   <Config Name="Invite code" Target="INVITE_CODE" Default="" Mode="" Description="New users must enter this to sign up. Leave blank to let anyone register." Type="Variable" Display="always" Required="false" Mask="true"></Config>
   <Config Name="Allow registration" Target="ALLOW_REGISTRATION" Default="true" Mode="" Description="Set to false to stop new sign-ups entirely." Type="Variable" Display="always" Required="false" Mask="false">true</Config>
   <Config Name="Max upload (MB)" Target="MAX_UPLOAD_MB" Default="50" Mode="" Description="Largest photo/video/file a user can send." Type="Variable" Display="always" Required="false" Mask="false">50</Config>
   <Config Name="FCM service account" Target="FCM_SERVICE_ACCOUNT" Default="" Mode="" Description="Path inside the container to your Firebase service-account JSON, e.g. /data/firebase-service-account.json. Leave blank to disable push." Type="Variable" Display="advanced" Required="false" Mask="false"></Config>
+  <Config Name="Giphy API key" Target="GIPHY_API_KEY" Default="" Mode="" Description="Free key from developers.giphy.com. Turns on GIF search." Type="Variable" Display="always" Required="false" Mask="true"></Config>
+  <Config Name="GIF rating" Target="GIF_RATING" Default="r" Mode="" Description="Giphy content rating: g, pg, pg-13 or r." Type="Variable" Display="advanced" Required="false" Mask="false">r</Config>
 </Container>

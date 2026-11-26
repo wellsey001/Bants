@@ -13,6 +13,7 @@ import {
   updateReceipts,
   sendTyping,
   notifyContactsPresence,
+  sweepExpired,
 } from './api.js';
 import './push.js';
 
@@ -182,6 +183,15 @@ server.on('upgrade', (req, socket, head) => {
     if (removeConnection(userId, entry)) notifyContactsPresence(userId, false);
   });
 });
+
+// Disappearing messages.
+setInterval(() => {
+  try {
+    sweepExpired();
+  } catch (err) {
+    console.error('[sweep]', err);
+  }
+}, Number(process.env.SWEEP_INTERVAL_MS || 30_000)).unref();
 
 // Ping every 30 s; drop connections that stopped answering (phone lost signal, etc).
 setInterval(() => {

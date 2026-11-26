@@ -4,7 +4,7 @@
 
 Self-hosted backend for **Bants**, a WhatsApp-style messaging app. It runs as one small Docker container on Unraid and has **no npm dependencies**. It uses Node 22's built-in SQLite, HTTP server and crypto.
 
-**Features:** accounts, usernames and friend codes, contact requests, 1:1 and group chats, real-time delivery over WebSocket, typing indicators, delivered/read receipts, online/last seen, photos/videos/files, edit and delete for everyone, blocking, and Android push notifications via Firebase.
+**Features:** accounts, usernames and friend codes, contact requests, 1:1 and group chats, real-time delivery over WebSocket, typing indicators, delivered/read receipts, online/last seen, photos/videos/files/voice notes, replies and reactions, GIFs and stickers, @mentions, link previews, disappearing messages, pinned and archived chats, message search, edit and delete for everyone, blocking, Android push notifications via Firebase, and an admin page.
 
 > Messages are stored unencrypted in the database on your server (`/data/bants.db`). Traffic is encrypted in transit by HTTPS through Cloudflare Tunnel.
 
@@ -53,6 +53,24 @@ Data is stored in `/mnt/user/appdata/bants-server`, which holds the database and
 
 The server only sends a push when the user has no live WebSocket connection, which usually means the app is closed or in the background. Pushes are data-only, so the app decides how to show the notification.
 
+## 5. GIFs (optional)
+
+1. Sign up at [developers.giphy.com](https://developers.giphy.com), go to **Create an App**, choose **API** and copy the key.
+2. Add `GIPHY_API_KEY=your-key` to the stack's ENV and click **Update Stack**.
+
+The server talks to Giphy for the phones, so the key never leaves Unraid. Set `GIF_RATING` to `g`, `pg` or `pg-13` if `r` is too much.
+
+## Admin page
+
+Open `https://your-domain/admin` and log in with your Bants account. The first account made on the server is the admin, and admins can make others admins too.
+
+From the admin page you can:
+- See how many people, chats, messages and files the server has
+- Turn sign-ups on or off and change the invite code (this overrides the container's settings)
+- Reset someone's password (you get a temporary one to send them)
+- Make or remove admins
+- Delete accounts
+
 ## Settings
 
 | Variable | Default | Meaning |
@@ -63,6 +81,8 @@ The server only sends a push when the user has no live WebSocket connection, whi
 | `ALLOW_REGISTRATION` | `true` | `false` closes sign-ups |
 | `MAX_UPLOAD_MB` | `50` | Upload size limit |
 | `FCM_SERVICE_ACCOUNT` | *(blank)* | Firebase JSON path; push is off if blank |
+| `GIPHY_API_KEY` | *(blank)* | Giphy key; GIF search is off if blank |
+| `GIF_RATING` | `r` | Giphy rating: `g`, `pg`, `pg-13` or `r` |
 | `TRUST_PROXY` | `true` | Read real client IPs from Cloudflare headers |
 | `LOG_REQUESTS` | `false` | Log every HTTP request |
 
@@ -70,7 +90,7 @@ The server only sends a push when the user has no live WebSocket connection, whi
 
 ```
 npm start          # needs Node 22.5+
-npm test           # spins up a temp server and runs 19 end-to-end checks
+npm test           # spins up a temp server and runs 26 end-to-end checks
 ```
 
 ---
@@ -120,6 +140,7 @@ Friend codes ignore case, spaces and dashes, so `k7qx m2pa` works. Online status
 | `POST /api/conversations` | `{ type: "direct", userId }` or `{ type: "group", name, memberIds, avatar? }` |
 | `GET /api/conversations/:id` | One chat |
 | `PATCH /api/conversations/:id` | `{ muted }` (anyone), or `{ name, avatar }` (group admins) |
+| `PATCH /api/conversations/:id` | Also takes `{ pinned, archived }` (just for you) and `{ disappearAfter: 0 \| 86400 \| 604800 \| 7776000 }` (seconds; admins only in groups) |
 | `POST /api/conversations/:id/members` | `{ userIds }`, admins only |
 | `DELETE /api/conversations/:id/members/:userId` | Remove someone (admin), or use your own id to leave |
 | `POST /api/conversations/:id/admins/:userId` | `{ admin: true \| false }` |
@@ -135,6 +156,16 @@ Friend codes ignore case, spaces and dashes, so `k7qx m2pa` works. Online status
 | `POST /api/messages/:id/react` | `{ emoji }`. Each person can have one reaction per message; sending the same emoji again removes it. |
 | `POST /api/conversations/:id/receipts` | `{ delivered?: messageId, read?: messageId }` |
 | `GET /api/sync?since=ID` | Everything new across all chats. Call this after reconnecting. |
+| `GET /api/search?q=text` | Up to 60 matching messages across your chats, newest first |
+| `GET /api/gifs?q=&offset=` | Giphy trending (no `q`) or search: `{ gifs: [{ id, title, preview, url, width, height }], nextOffset }` |
+| `POST /api/conversations/:id/gif` | `{ url, clientId, replyTo? }` with a GIF's `url`. The server downloads it and sends it as a picture. |
+| `GET /api/stickers`, `POST /api/stickers { media }`, `DELETE /api/stickers/:id` | Your sticker collection. Send one with `{ media, kind: "sticker" }`. |
+
+**Mentions:** writing `@username` in a group records it in `meta.mentions`, and that person gets a push even if they muted the chat.
+
+**Link previews:** the first link in a text message gets a preview a moment after sending (`meta.preview: { url, title, description, siteName, image }`), delivered as `message.updated`. The server refuses to fetch anything on your home network.
+
+**Disappearing messages:** messages sent while a timer is on carry `expiresAt`. When it passes, the server deletes them and sends `message.removed { conversationId, ids }`.
 
 `clientId` is a random ID the app generates, such as a UUID. If a send is retried with the same `clientId`, the server returns the original message instead of creating a duplicate.
 
@@ -167,6 +198,7 @@ You can use an `Authorization` header instead of the query string. The server se
 | `conversation.updated` / `conversation.removed` | `conversation` / `conversationId` |
 | `contact.request` / `contact.request.removed` / `contact.added` | Request or contact details |
 | `user.updated` | `user`, when a contact changes their name or picture |
+| `message.removed` | `conversationId, ids`: disappearing messages that have expired |
 | `error` | `error, code, clientId?` |
 
 **App → server**

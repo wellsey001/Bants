@@ -10,7 +10,7 @@ const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'msgr-'));
 const base = `http://127.0.0.1:${port}`;
 
 const server = spawn(process.execPath, ['--disable-warning=ExperimentalWarning', 'src/index.js'], {
-  env: { ...process.env, PORT: String(port), DATA_DIR: dataDir, INVITE_CODE: 'letmein' },
+  env: { ...process.env, PORT: String(port), DATA_DIR: dataDir, INVITE_CODE: 'letmein', SWEEP_INTERVAL_MS: '300', REGISTER_LIMIT: '50', GIPHY_API_KEY: '' },
   stdio: ['ignore', 'pipe', 'inherit'],
 });
 await new Promise((resolve) => server.stdout.on('data', (d) => String(d).includes('listening') && resolve()));
@@ -203,6 +203,53 @@ try {
     assert.deepEqual(voice.data.mediaInfo, { mime: 'audio/mp4', size: 300, filename: 'voice.m4a' });
   });
 
+  await step('pin, archive and search', async () => {
+    let c = await api('PATCH', `/api/conversations/${convId}`, { token: bob.token, body: { pinned: true, archived: true } });
+    assert.equal(c.data.pinned, true);
+    assert.equal(c.data.archived, true);
+    await api('POST', `/api/conversations/${convId}/messages`, { token: alice.token, body: { body: 'unarchive me please' } });
+    c = await api('GET', `/api/conversations/${convId}`, { token: bob.token });
+    assert.equal(c.data.archived, false, 'a new message unarchives');
+    assert.equal(c.data.pinned, true);
+    const found = await api('GET', '/api/search?q=UNARCHIVE', { token: bob.token });
+    assert.equal(found.data.results.length, 1);
+    const none = await api('GET', '/api/search?q=unarchive', { token: carol.token });
+    assert.equal(none.data.results.length, 0, 'cannot search chats you are not in');
+    const pct = await api('GET', '/api/search?q=' + encodeURIComponent('%%'), { token: bob.token });
+    assert.equal(pct.data.results.length, 0, 'wildcards are escaped');
+  });
+
+  await step('stickers', async () => {
+    const up = await api('POST', '/api/media', { token: alice.token, raw: Buffer.alloc(400, 2), headers: { 'content-type': 'image/png' } });
+    const st = await api('POST', '/api/stickers', { token: alice.token, body: { media: up.data.id } });
+    assert.equal(st.data.media, up.data.id);
+    const sent = await api('POST', `/api/conversations/${convId}/messages`, { token: alice.token, body: { media: up.data.id, kind: 'sticker' } });
+    assert.equal(sent.data.kind, 'sticker');
+    // Bob saves Alice's sticker from the chat and can send it himself.
+    const saved = await api('POST', '/api/stickers', { token: bob.token, body: { media: up.data.id } });
+    assert.equal(saved.status, 200);
+    const resent = await api('POST', `/api/conversations/${convId}/messages`, { token: bob.token, body: { media: up.data.id, kind: 'sticker' } });
+    assert.equal(resent.data.kind, 'sticker');
+    const theft = await api('POST', '/api/stickers', { token: carol.token, body: { media: up.data.id } });
+    assert.equal(theft.status, 403, 'cannot grab files you cannot see');
+    const list = await api('GET', '/api/stickers', { token: bob.token });
+    assert.equal(list.data.length, 1);
+    assert.equal((await api('DELETE', `/api/stickers/${list.data[0].id}`, { token: bob.token })).status, 200);
+  });
+
+  await step('GIFs say they are off without a key', async () => {
+    const r = await api('GET', '/api/gifs?q=cat', { token: alice.token });
+    assert.equal(r.status, 503);
+    assert.equal((await api('GET', '/api/server')).data.gifs, false);
+  });
+
+  await step('link previews never fetch the home network', async () => {
+    const m = await api('POST', `/api/conversations/${convId}/messages`, { token: alice.token, body: { body: `look http://127.0.0.1:${port}/api/health` } });
+    await new Promise((r) => setTimeout(r, 400));
+    const page = await api('GET', `/api/conversations/${convId}/messages?after=${m.data.id - 1}`, { token: alice.token });
+    assert.equal(page.data.messages[0].meta, null);
+  });
+
   await step('group chat: create, message, add, leave', async () => {
     // bob and carol need a contact link for later; alice is contacts with both.
     const g = await api('POST', '/api/conversations', { token: alice.token, body: { type: 'group', name: 'Gang', memberIds: [bob.user.id] } });
@@ -218,6 +265,51 @@ try {
     const after = await api('GET', `/api/conversations/${g.data.id}`, { token: bob.token });
     assert.equal(after.data.members.length, 2);
     assert.ok(after.data.members.some((m) => m.role === 'admin'), 'someone was promoted to admin');
+  });
+
+  await step('mentions are recorded and disappearing messages vanish', async () => {
+    const g = await api('POST', '/api/conversations', { token: alice.token, body: { type: 'group', name: 'Mention test', memberIds: [carol.user.id] } });
+    const m = await api('POST', `/api/conversations/${g.data.id}/messages`, { token: alice.token, body: { body: 'oi @Carol and @nobody' } });
+    assert.deepEqual(m.data.meta, { mentions: [carol.user.id] });
+    const nonAdmin = await api('PATCH', `/api/conversations/${g.data.id}`, { token: carol.token, body: { disappearAfter: 86400 } });
+    assert.equal(nonAdmin.status, 403);
+    const bad = await api('PATCH', `/api/conversations/${g.data.id}`, { token: alice.token, body: { disappearAfter: 5 } });
+    assert.equal(bad.status, 400);
+    const on = await api('PATCH', `/api/conversations/${g.data.id}`, { token: alice.token, body: { disappearAfter: 86400 } });
+    assert.equal(on.data.disappearAfter, 86400);
+    const temp = await api('POST', `/api/conversations/${g.data.id}/messages`, { token: alice.token, body: { body: 'this will vanish' } });
+    assert.ok(temp.data.expiresAt > Date.now() + 86_000_000);
+    // Wind the clock forward by editing the database directly.
+    const { DatabaseSync } = await import('node:sqlite');
+    const raw = new DatabaseSync(path.join(dataDir, 'bants.db'));
+    raw.prepare('UPDATE messages SET expires_at = 1 WHERE id = ?').run(temp.data.id);
+    raw.close();
+    const carolWs2 = socket(carol.token);
+    const gone = await carolWs2.waitFor((e) => e.type === 'message.removed' && e.ids.includes(temp.data.id), 3000);
+    assert.equal(gone.conversationId, g.data.id);
+    carolWs2.close();
+  });
+
+  await step('admin: first user runs the server', async () => {
+    const meA = await api('GET', '/api/me', { token: alice.token });
+    assert.equal(meA.data.isAdmin, true);
+    assert.equal((await api('GET', '/api/admin/users', { token: bob.token })).status, 403);
+    const users = await api('GET', '/api/admin/users', { token: alice.token });
+    assert.equal(users.data.length, 3);
+    const ov = await api('GET', '/api/admin/overview', { token: alice.token });
+    assert.equal(ov.data.inviteCode, 'letmein');
+    await api('PATCH', '/api/admin/settings', { token: alice.token, body: { inviteCode: 'newcode' } });
+    const r1 = await api('POST', '/api/auth/register', { body: { username: 'dan', password: 'password123', inviteCode: 'letmein' } });
+    assert.equal(r1.status, 403, 'old invite code stops working');
+    const r2 = await api('POST', '/api/auth/register', { body: { username: 'dan', password: 'password123', inviteCode: 'newcode' } });
+    assert.equal(r2.status, 200);
+    const reset = await api('POST', `/api/admin/users/${r2.data.user.id}/reset-password`, { token: alice.token });
+    assert.equal((await api('GET', '/api/me', { token: r2.data.token })).status, 401, 'reset signs them out');
+    assert.equal((await api('POST', '/api/auth/login', { body: { username: 'dan', password: reset.data.password } })).status, 200);
+    assert.equal((await api('DELETE', `/api/admin/users/${r2.data.user.id}`, { token: alice.token })).status, 200);
+    const page = await fetch(base + '/admin');
+    assert.equal(page.status, 200);
+    assert.ok((await page.text()).includes('Bants admin'));
   });
 
   await step('sync returns messages since an id', async () => {

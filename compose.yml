@@ -22,7 +22,9 @@ services:
       ALLOW_REGISTRATION: ${ALLOW_REGISTRATION:-true}
       MAX_UPLOAD_MB: ${MAX_UPLOAD_MB:-50}
       FCM_SERVICE_ACCOUNT: ${FCM_SERVICE_ACCOUNT:-}
+      GIPHY_API_KEY: ${GIPHY_API_KEY:-}
+      GIF_RATING: ${GIF_RATING:-r}
       TZ: Europe/London
     labels:
       net.unraid.docker.icon: https://raw.githubusercontent.com/wellsey001/Bants/main/assets/icon.png
-      net.unraid.docker.webui: http://[IP]:[PORT:42069]/api/health
+      net.unraid.docker.webui: http://[IP]:[PORT:42069]/admin

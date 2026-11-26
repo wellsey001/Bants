@@ -11,5 +11,9 @@ export const config = {
   // Path to a Firebase service-account JSON file. Push notifications are off if missing.
   fcmServiceAccount: env.FCM_SERVICE_ACCOUNT || '',
   // Set when running behind Cloudflare Tunnel / a reverse proxy so client IPs are read correctly.
+  // Free key from developers.giphy.com. GIF search is off without one.
+  giphyKey: env.GIPHY_API_KEY || '',
+  // Giphy content rating: g, pg, pg-13 or r.
+  gifRating: env.GIF_RATING || 'r',
   trustProxy: (env.TRUST_PROXY || 'true') !== 'false',
 };

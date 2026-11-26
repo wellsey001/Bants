@@ -1,0 +1,217 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Bants admin</title>
+<link rel="icon" href="data:,">
+<link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,700;12..96,800&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  :root { --ink: #111; --cream: #FFF6E5; --purple: #5B4BFF; --yellow: #FFD23F; --pink: #FF4D8D; --muted: #4A4A4A; --red: #D1243B; }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--cream); color: var(--ink); font: 15px/1.45 Inter, system-ui, sans-serif; }
+  h1, h2, .big { font-family: 'Bricolage Grotesque', sans-serif; font-weight: 800; letter-spacing: -0.02em; margin: 0; }
+  main { max-width: 1040px; margin: 0 auto; padding: 28px 18px 60px; display: flex; flex-direction: column; gap: 22px; }
+  .sticker { display: inline-block; background: var(--yellow); padding: 0 10px; border-radius: 10px; transform: rotate(-2deg); font-size: 40px; }
+  .card { background: #fff; border: 2.5px solid var(--ink); border-radius: 18px; box-shadow: 4px 4px 0 var(--ink); padding: 18px; }
+  .row { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 14px; }
+  .stat .big { font-size: 32px; }
+  .stat .label { font-size: 12px; font-weight: 800; letter-spacing: .08em; color: var(--muted); text-transform: uppercase; }
+  button { font: inherit; font-weight: 700; cursor: pointer; border: 2.5px solid var(--ink); border-radius: 12px; padding: 9px 14px; background: #fff; color: var(--ink); box-shadow: 3px 3px 0 var(--ink); }
+  button:active { transform: translate(2px, 2px); box-shadow: 1px 1px 0 var(--ink); }
+  button.primary { background: var(--purple); color: #fff; }
+  button.danger { color: var(--red); }
+  button.small { padding: 5px 10px; font-size: 13px; box-shadow: 2px 2px 0 var(--ink); }
+  input[type=text], input[type=password] { font: inherit; border: 2.5px solid var(--ink); border-radius: 12px; padding: 10px 12px; background: #fff; min-width: 0; }
+  label { font-weight: 600; }
+  table { width: 100%; border-collapse: collapse; }
+  th { text-align: left; font-size: 12px; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); padding: 8px; border-bottom: 2.5px solid var(--ink); }
+  td { padding: 10px 8px; border-bottom: 1.5px solid #E8DFCB; vertical-align: middle; }
+  .table-wrap { overflow-x: auto; }
+  .pill { display: inline-block; border: 2px solid var(--ink); border-radius: 999px; padding: 1px 9px; font-size: 12px; font-weight: 800; }
+  .pill.yes { background: var(--yellow); }
+  .pill.on { background: #7BE495; }
+  .note { color: var(--muted); font-size: 14px; }
+  .error { color: var(--red); font-weight: 600; }
+  .switch { display: inline-flex; align-items: center; gap: 8px; }
+  .switch input { width: 20px; height: 20px; accent-color: var(--purple); }
+  #login { max-width: 380px; margin: 60px auto; display: flex; flex-direction: column; gap: 12px; }
+  .hidden { display: none !important; }
+  .password-box { font: 700 22px/1.2 ui-monospace, monospace; background: var(--yellow); border: 2.5px solid var(--ink); border-radius: 12px; padding: 10px 14px; user-select: all; }
+</style>
+</head>
+<body>
+<main>
+  <div class="row" style="justify-content: space-between">
+    <h1><span class="sticker">bants</span> <span style="font-size: 28px; margin-left: 8px">admin</span></h1>
+    <button id="logout" class="hidden" type="button">Log out</button>
+  </div>
+
+  <form id="login" class="card hidden">
+    <h2>Log in</h2>
+    <p class="note" style="margin: 0">Use your Bants account. Only server admins can get in.</p>
+    <label for="u">Username</label>
+    <input id="u" type="text" autocomplete="username" required>
+    <label for="p">Password</label>
+    <input id="p" type="password" autocomplete="current-password" required>
+    <p id="login-error" class="error" style="margin: 0"></p>
+    <button class="primary" type="submit">Log in</button>
+  </form>
+
+  <div id="app" class="hidden" style="display: flex; flex-direction: column; gap: 22px">
+    <section class="grid" id="stats" aria-label="Server stats"></section>
+
+    <section class="card">
+      <h2 style="margin-bottom: 12px">Sign-ups</h2>
+      <div class="row">
+        <span class="switch"><input id="allow" type="checkbox"><label for="allow">Let new people sign up</label></span>
+      </div>
+      <div class="row" style="margin-top: 12px">
+        <label for="invite">Invite code</label>
+        <input id="invite" type="text" placeholder="Blank = anyone can sign up" style="flex: 1; max-width: 320px">
+        <button id="save-settings" class="primary" type="button">Save</button>
+        <span id="settings-msg" class="note"></span>
+      </div>
+      <p class="note">Changes here take effect straight away and override the container's settings.</p>
+    </section>
+
+    <section class="card">
+      <h2 style="margin-bottom: 12px">People</h2>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Name</th><th>Username</th><th>Joined</th><th>Last seen</th><th>Messages</th><th>Admin</th><th></th></tr></thead>
+          <tbody id="users"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section id="reset-result" class="card hidden">
+      <h2>New password</h2>
+      <p class="note" id="reset-who"></p>
+      <div class="password-box" id="reset-pass"></div>
+      <p class="note">Send it to them privately. They've been signed out everywhere and can change it later in the app.</p>
+      <button type="button" onclick="document.getElementById('reset-result').classList.add('hidden')">Done</button>
+    </section>
+  </div>
+</main>
+
+<script>
+const $ = (id) => document.getElementById(id);
+let token = sessionStorage.getItem('bants-admin-token');
+let me = null;
+
+async function api(method, path, body) {
+  const res = await fetch(path, {
+    method,
+    headers: { 'content-type': 'application/json', ...(token ? { authorization: 'Bearer ' + token } : {}) },
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  const data = await res.json().catch(() => ({}));
+  if (res.status === 401) { signOut(); throw new Error('Signed out'); }
+  if (!res.ok) throw new Error(data.error || 'Something went wrong');
+  return data;
+}
+
+function signOut() {
+  token = null;
+  sessionStorage.removeItem('bants-admin-token');
+  $('app').classList.add('hidden');
+  $('logout').classList.add('hidden');
+  $('login').classList.remove('hidden');
+}
+
+const size = (n) => n > 1e9 ? (n / 1e9).toFixed(1) + ' GB' : n > 1e6 ? (n / 1e6).toFixed(1) + ' MB' : Math.round(n / 1e3) + ' KB';
+const when = (ts) => ts ? new Date(ts).toLocaleString('en-GB', { day: 'numeric', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' }) : '—';
+
+function el(tag, props = {}, ...children) {
+  const e = document.createElement(tag);
+  Object.assign(e, props);
+  for (const c of children) e.append(c);
+  return e;
+}
+
+async function load() {
+  const [o, users] = await Promise.all([api('GET', '/api/admin/overview'), api('GET', '/api/admin/users')]);
+  const stats = [
+    ['People', o.users], ['Chats', o.conversations], ['Messages', o.messages],
+    ['Files', `${o.mediaFiles} · ${size(o.mediaBytes)}`], ['Database', size(o.dbBytes)],
+    ['Push', o.push ? 'On' : 'Off'], ['GIFs', o.gifs ? 'On' : 'Off'],
+  ];
+  $('stats').replaceChildren(...stats.map(([label, value]) =>
+    el('div', { className: 'card stat' }, el('div', { className: 'label', textContent: label }), el('div', { className: 'big', textContent: String(value) }))));
+  $('allow').checked = o.allowRegistration;
+  $('invite').value = o.inviteCode;
+
+  $('users').replaceChildren(...users.map((u) => {
+    const isMe = me && u.id === me.id;
+    const actions = el('td', { style: 'white-space: nowrap' });
+    const reset = el('button', { className: 'small', type: 'button', textContent: 'Reset password' });
+    reset.onclick = async () => {
+      if (!confirm(`Reset ${u.displayName}'s password? They'll be signed out.`)) return;
+      try {
+        const r = await api('POST', `/api/admin/users/${u.id}/reset-password`);
+        $('reset-who').textContent = `${u.displayName} (@${u.username})`;
+        $('reset-pass').textContent = r.password;
+        $('reset-result').classList.remove('hidden');
+        $('reset-result').scrollIntoView({ behavior: 'smooth' });
+      } catch (e) { alert(e.message); }
+    };
+    const adminBtn = el('button', { className: 'small', type: 'button', textContent: u.isAdmin ? 'Remove admin' : 'Make admin', disabled: isMe });
+    adminBtn.onclick = async () => { try { await api('POST', `/api/admin/users/${u.id}/admin`, { admin: !u.isAdmin }); load(); } catch (e) { alert(e.message); } };
+    const del = el('button', { className: 'small danger', type: 'button', textContent: 'Delete', disabled: isMe });
+    del.onclick = async () => {
+      if (!confirm(`Delete ${u.displayName}'s account and everything they've sent? This can't be undone.`)) return;
+      try { await api('DELETE', `/api/admin/users/${u.id}`); load(); } catch (e) { alert(e.message); }
+    };
+    actions.append(reset, ' ', adminBtn, ' ', del);
+    return el('tr', {},
+      el('td', {}, el('strong', { textContent: u.displayName }), u.online ? el('span', { className: 'pill on', style: 'margin-left: 6px', textContent: 'online' }) : ''),
+      el('td', { textContent: '@' + u.username }),
+      el('td', { textContent: when(u.createdAt) }),
+      el('td', { textContent: u.online ? 'now' : when(u.lastSeen) }),
+      el('td', { textContent: String(u.messages) }),
+      el('td', {}, u.isAdmin ? el('span', { className: 'pill yes', textContent: 'Admin' }) : ''),
+      actions,
+    );
+  }));
+}
+
+async function enter() {
+  me = await api('GET', '/api/me');
+  if (!me.isAdmin) {
+    signOut();
+    $('login-error').textContent = 'That account isn’t a server admin.';
+    return;
+  }
+  $('login').classList.add('hidden');
+  $('app').classList.remove('hidden');
+  $('logout').classList.remove('hidden');
+  await load();
+}
+
+$('login').onsubmit = async (e) => {
+  e.preventDefault();
+  $('login-error').textContent = '';
+  try {
+    const r = await api('POST', '/api/auth/login', { username: $('u').value, password: $('p').value, deviceName: 'Admin page' });
+    token = r.token;
+    sessionStorage.setItem('bants-admin-token', token);
+    await enter();
+  } catch (err) { $('login-error').textContent = err.message; }
+};
+
+$('logout').onclick = async () => { try { await api('POST', '/api/auth/logout'); } catch {} signOut(); };
+
+$('save-settings').onclick = async () => {
+  try {
+    await api('PATCH', '/api/admin/settings', { allowRegistration: $('allow').checked, inviteCode: $('invite').value });
+    $('settings-msg').textContent = 'Saved';
+    setTimeout(() => ($('settings-msg').textContent = ''), 2000);
+  } catch (e) { $('settings-msg').textContent = e.message; }
+};
+
+if (token) enter().catch(signOut); else signOut();
+</script>
+</body>
+</html>

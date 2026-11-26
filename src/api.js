@@ -16,6 +16,9 @@ import {
 } from './auth.js';
 import { sendToUser, sendToConversation, isOnline, disconnect } from './hub.js';
 import { pushToUser } from './push.js';
+import { registrationSettings, setSetting } from './settings.js';
+import { firstUrl, fetchPreview } from './previews.js';
+import { gifsEnabled, findGifs, downloadGif } from './gifs.js';
 
 export class HttpError extends Error {
   constructor(status, message, code = undefined) {
@@ -51,7 +54,21 @@ export function userOut(row, viewerId = null) {
 }
 
 function meOut(row) {
-  return { ...userOut(row, row.id), friendCode: formatFriendCode(row.friend_code), createdAt: row.created_at };
+  return {
+    ...userOut(row, row.id),
+    friendCode: formatFriendCode(row.friend_code),
+    createdAt: row.created_at,
+    isAdmin: !!row.is_admin,
+  };
+}
+
+function parseMeta(text) {
+  if (!text) return null;
+  try {
+    return JSON.parse(text);
+  } catch {
+    return null;
+  }
 }
 
 export function messageOut(m) {
@@ -79,6 +96,8 @@ export function messageOut(m) {
     deleted: !!m.deleted,
     reactions,
     mediaInfo: media ? { mime: media.mime, size: media.size, filename: media.filename } : null,
+    meta: m.deleted ? null : parseMeta(m.meta),
+    expiresAt: m.expires_at ?? null,
   };
 }
 
@@ -86,7 +105,7 @@ function conversationOut(convId, viewerId) {
   const c = q('SELECT * FROM conversations WHERE id = ?').get(convId);
   if (!c) return null;
   const memberRows = q(
-    `SELECT m.role, m.last_read, m.last_delivered, m.muted, u.*
+    `SELECT m.role, m.last_read, m.last_delivered, m.muted, m.pinned, m.archived, u.*
        FROM members m JOIN users u ON u.id = m.user_id
       WHERE m.conversation_id = ? ORDER BY m.joined_at`,
   ).all(convId);
@@ -104,6 +123,9 @@ function conversationOut(convId, viewerId) {
     createdAt: c.created_at,
     updatedAt: c.updated_at,
     muted: !!me?.muted,
+    pinned: !!me?.pinned,
+    archived: !!me?.archived,
+    disappearAfter: c.disappear_after || 0,
     unreadCount: unread,
     lastMessage: last ? messageOut(last) : null,
     members: memberRows.map((r) => ({
@@ -145,12 +167,48 @@ function str(v, max, field) {
   if (s.length > max) throw bad(`${field} is too long (max ${max})`);
   return s;
 }
+/** Whether someone may see a file: theirs, their sticker, an avatar, or used in one of their chats. */
+function canSeeMedia(m, userId) {
+  return (
+    m.uploader_id === userId ||
+    !!q('SELECT 1 FROM stickers WHERE media_id = ? AND user_id = ?').get(m.id, userId) ||
+    !!q('SELECT 1 FROM users WHERE avatar_media = ?').get(m.id) ||
+    !!q(`SELECT 1 FROM conversations c JOIN members mb ON mb.conversation_id = c.id WHERE c.avatar_media = ? AND mb.user_id = ?`).get(m.id, userId) ||
+    !!q(`SELECT 1 FROM messages msg JOIN members mb ON mb.conversation_id = msg.conversation_id WHERE msg.media_id = ? AND mb.user_id = ?`).get(m.id, userId) ||
+    !!q(`SELECT 1 FROM messages msg JOIN members mb ON mb.conversation_id = msg.conversation_id WHERE msg.meta LIKE ? AND mb.user_id = ?`).get(`%${m.id}%`, userId)
+  );
+}
+
 function requireMedia(id, userId) {
   if (id === undefined || id === null) return null;
   const m = q('SELECT * FROM media WHERE id = ?').get(String(id));
   if (!m) throw bad('Unknown media id');
-  if (m.uploader_id !== userId) throw forbidden('You can only attach media you uploaded');
+  if (!canSeeMedia(m, userId)) throw forbidden('You can’t use that file');
   return m;
+}
+
+/** Stores bytes as a media file and returns its id. */
+export function saveMediaBuffer(buffer, mime, filename, uploaderId) {
+  const id = crypto.randomBytes(16).toString('hex');
+  fs.writeFileSync(path.join(MEDIA_DIR(), id), buffer);
+  q('INSERT INTO media (id, uploader_id, mime, size, filename, created_at) VALUES (?, ?, ?, ?, ?, ?)').run(
+    id, uploaderId, mime, buffer.length, filename || '', Date.now(),
+  );
+  return id;
+}
+
+/** Removes a file once nothing refers to it any more. */
+function deleteMediaIfUnused(id) {
+  if (!id) return;
+  const used =
+    q('SELECT 1 FROM messages WHERE media_id = ? LIMIT 1').get(id) ||
+    q('SELECT 1 FROM messages WHERE meta LIKE ? LIMIT 1').get(`%${id}%`) ||
+    q('SELECT 1 FROM stickers WHERE media_id = ? LIMIT 1').get(id) ||
+    q('SELECT 1 FROM users WHERE avatar_media = ? LIMIT 1').get(id) ||
+    q('SELECT 1 FROM conversations WHERE avatar_media = ? LIMIT 1').get(id);
+  if (used) return;
+  q('DELETE FROM media WHERE id = ?').run(id);
+  fs.rmSync(path.join(MEDIA_DIR(), id), { force: true });
 }
 
 function getOrCreateDirect(a, b) {
@@ -217,7 +275,9 @@ export function sendMessage(userId, convId, input) {
   const body = str(input.body ?? input.text ?? '', 10_000, 'body') || '';
   const media = requireMedia(input.media, userId);
   let kind = 'text';
-  if (media) {
+  if (media && input.kind === 'sticker' && media.mime.startsWith('image/')) {
+    kind = 'sticker';
+  } else if (media) {
     kind = media.mime.startsWith('image/')
       ? 'image'
       : media.mime.startsWith('video/')
@@ -235,14 +295,25 @@ export function sendMessage(userId, convId, input) {
     replyTo = r.id;
   }
 
+  // @mentions: anyone in the chat whose username follows an @.
+  const memberRows = q(
+    'SELECT u.id, u.username FROM members m JOIN users u ON u.id = m.user_id WHERE m.conversation_id = ? AND u.id != ?',
+  ).all(convId, userId);
+  const named = new Set([...body.matchAll(/@([a-z0-9_.]{3,24})/gi)].map((x) => x[1].toLowerCase()));
+  const mentions = memberRows.filter((r) => named.has(r.username.toLowerCase())).map((r) => r.id);
+  const meta = mentions.length ? { mentions } : null;
+
   const now = Date.now();
+  const expiresAt = conv.disappear_after > 0 ? now + conv.disappear_after * 1000 : null;
   const row = tx(() => {
     const { lastInsertRowid } = q(
-      `INSERT INTO messages (conversation_id, sender_id, client_id, kind, body, media_id, reply_to, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-    ).run(convId, userId, clientId, kind, body, media ? media.id : null, replyTo, now);
+      `INSERT INTO messages (conversation_id, sender_id, client_id, kind, body, media_id, reply_to, created_at, meta, expires_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(convId, userId, clientId, kind, body, media ? media.id : null, replyTo, now, meta ? JSON.stringify(meta) : null, expiresAt);
     const id = Number(lastInsertRowid);
     q('UPDATE conversations SET updated_at = ? WHERE id = ?').run(now, convId);
+    // A new message brings an archived chat back for everyone else.
+    q('UPDATE members SET archived = 0 WHERE conversation_id = ? AND user_id != ? AND archived = 1').run(convId, userId);
     // The sender has obviously read their own message.
     q('UPDATE members SET last_read = ?, last_delivered = ? WHERE conversation_id = ? AND user_id = ?').run(id, id, convId, userId);
     return q('SELECT * FROM messages WHERE id = ?').get(id);
@@ -255,8 +326,10 @@ export function sendMessage(userId, convId, input) {
   const sender = getUser(userId);
   const others = q('SELECT user_id, muted FROM members WHERE conversation_id = ? AND user_id != ?').all(convId, userId);
   for (const o of others) {
-    if (o.muted || isOnline(o.user_id)) continue;
+    const mentioned = mentions.includes(o.user_id);
+    if ((o.muted && !mentioned) || isOnline(o.user_id)) continue;
     pushToUser(o.user_id, {
+      mentioned: mentioned ? '1' : '0',
       type: 'message',
       conversationId: convId,
       conversationType: conv.type,
@@ -268,7 +341,42 @@ export function sendMessage(userId, convId, input) {
       body: body.slice(0, 200),
     }).catch(() => {});
   }
+
+  const link = kind === 'text' ? firstUrl(body) : null;
+  if (link) addLinkPreview(row.id, link, userId).catch(() => {});
   return { message, duplicate: false };
+}
+
+/** Fetches a link's title and picture after sending, then updates the message for everyone. */
+async function addLinkPreview(messageId, url, userId) {
+  const preview = await fetchPreview(url);
+  if (!preview) return;
+  const m = q('SELECT * FROM messages WHERE id = ?').get(messageId);
+  if (!m || m.deleted) return;
+  let image = null;
+  if (preview.image) image = saveMediaBuffer(preview.image.body, preview.image.mime, 'preview', userId);
+  const meta = parseMeta(m.meta) || {};
+  meta.preview = { url: preview.url, title: preview.title, description: preview.description, siteName: preview.siteName, image };
+  q('UPDATE messages SET meta = ? WHERE id = ?').run(JSON.stringify(meta), messageId);
+  sendToConversation(m.conversation_id, { type: 'message.updated', message: messageOut(q('SELECT * FROM messages WHERE id = ?').get(messageId)) });
+}
+
+/** Deletes messages whose disappearing timer has run out. Called every 30 seconds. */
+export function sweepExpired() {
+  const rows = q('SELECT id, conversation_id, media_id, meta FROM messages WHERE expires_at IS NOT NULL AND expires_at <= ?').all(Date.now());
+  if (!rows.length) return;
+  const byConv = new Map();
+  for (const r of rows) {
+    q('DELETE FROM messages WHERE id = ?').run(r.id);
+    if (!byConv.has(r.conversation_id)) byConv.set(r.conversation_id, []);
+    byConv.get(r.conversation_id).push(r.id);
+  }
+  for (const r of rows) {
+    deleteMediaIfUnused(r.media_id);
+    const img = parseMeta(r.meta)?.preview?.image;
+    if (img) deleteMediaIfUnused(img);
+  }
+  for (const [convId, ids] of byConv) sendToConversation(convId, { type: 'message.removed', conversationId: convId, ids });
 }
 
 export function updateReceipts(userId, convId, { delivered, read }) {
@@ -298,7 +406,7 @@ export function sendTyping(userId, convId, typing = true) {
 // ───────────────────────── routes ─────────────────────────
 
 export const routes = [];
-const route = (method, pattern, handler, { auth = true, raw = false } = {}) => {
+export const route = (method, pattern, handler, { auth = true, raw = false } = {}) => {
   const keys = [];
   const re = new RegExp(
     '^' + pattern.replace(/:(\w+)/g, (_, k) => (keys.push(k), '([^/]+)')) + '/?$',
@@ -308,17 +416,22 @@ const route = (method, pattern, handler, { auth = true, raw = false } = {}) => {
 
 route('GET', '/api/health', () => ({ ok: true }), { auth: false });
 
-route('GET', '/api/server', () => ({
-  name: 'bants-server',
-  registration: config.allowRegistration ? (config.inviteCode ? 'invite' : 'open') : 'closed',
-  maxUploadBytes: config.maxUploadBytes,
-}), { auth: false });
+route('GET', '/api/server', () => {
+  const reg = registrationSettings();
+  return {
+    name: 'bants-server',
+    registration: reg.allowRegistration ? (reg.inviteCode ? 'invite' : 'open') : 'closed',
+    maxUploadBytes: config.maxUploadBytes,
+    gifs: gifsEnabled(),
+  };
+}, { auth: false });
 
 // ── auth ──
 route('POST', '/api/auth/register', async ({ body, ip }) => {
-  if (rateLimited(`reg:${ip}`, 5, 60 * 60_000)) throw new HttpError(429, 'Too many attempts, try later');
-  if (!config.allowRegistration) throw forbidden('Registration is closed on this server');
-  if (config.inviteCode && body.inviteCode !== config.inviteCode) throw forbidden('Invalid invite code');
+  if (rateLimited(`reg:${ip}`, Number(process.env.REGISTER_LIMIT || 5), 60 * 60_000)) throw new HttpError(429, 'Too many attempts, try later');
+  const reg = registrationSettings();
+  if (!reg.allowRegistration) throw forbidden('Registration is closed on this server');
+  if (reg.inviteCode && String(body.inviteCode || '').trim() !== reg.inviteCode) throw forbidden('Invalid invite code');
   const username = str(body.username, 24, 'username');
   if (!username || !USERNAME_RE.test(username)) {
     throw bad('Username must be 3–24 characters: letters, numbers, _ or .', 'invalid_username');
@@ -330,9 +443,10 @@ route('POST', '/api/auth/register', async ({ body, ip }) => {
 
   const passwordHash = await hashPassword(body.password);
   const now = Date.now();
+  const firstAdmin = q('SELECT 1 FROM users WHERE is_admin = 1').get() ? 0 : 1;
   const { lastInsertRowid } = q(
-    `INSERT INTO users (username, display_name, friend_code, password_hash, created_at, last_seen) VALUES (?, ?, ?, ?, ?, ?)`,
-  ).run(username, displayName, newFriendCode(), passwordHash, now, now);
+    `INSERT INTO users (username, display_name, friend_code, password_hash, created_at, last_seen, is_admin) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+  ).run(username, displayName, newFriendCode(), passwordHash, now, now, firstAdmin);
   const user = getUser(Number(lastInsertRowid));
   const token = createSession(user.id, body.deviceName);
   return { token, user: meOut(user) };
@@ -599,6 +713,29 @@ route('PATCH', '/api/conversations/:id', ({ user, params, body }) => {
   if (body.muted !== undefined) {
     q('UPDATE members SET muted = ? WHERE conversation_id = ? AND user_id = ?').run(body.muted ? 1 : 0, id, user.id);
   }
+  if (body.pinned !== undefined) {
+    q('UPDATE members SET pinned = ? WHERE conversation_id = ? AND user_id = ?').run(body.pinned ? 1 : 0, id, user.id);
+  }
+  if (body.archived !== undefined) {
+    q('UPDATE members SET archived = ? WHERE conversation_id = ? AND user_id = ?').run(body.archived ? 1 : 0, id, user.id);
+  }
+  if (body.disappearAfter !== undefined) {
+    const allowed = [0, 86_400, 604_800, 7_776_000];
+    const secs = Number(body.disappearAfter);
+    if (!allowed.includes(secs)) throw bad('Pick off, 24 hours, 7 days or 90 days');
+    const c = q('SELECT * FROM conversations WHERE id = ?').get(id);
+    if (c.type === 'group') requireAdmin(id, user.id);
+    if (c.disappear_after !== secs) {
+      q('UPDATE conversations SET disappear_after = ? WHERE id = ?').run(secs, id);
+      const label = { 0: 'off', 86400: '24 hours', 604800: '7 days', 7776000: '90 days' }[secs];
+      const msg = insertSystemMessage(
+        id,
+        secs ? `${user.display_name} turned on disappearing messages. New messages will vanish after ${label}.` : `${user.display_name} turned off disappearing messages.`,
+      );
+      sendToConversation(id, { type: 'message.new', message: messageOut(msg) });
+      broadcastConversation(id);
+    }
+  }
   if (body.name !== undefined || body.avatar !== undefined) {
     requireAdmin(id, user.id);
     const c = q('SELECT * FROM conversations WHERE id = ?').get(id);
@@ -698,7 +835,7 @@ route('PATCH', '/api/messages/:id', ({ user, params, body }) => {
 route('DELETE', '/api/messages/:id', ({ user, params }) => {
   const m = q('SELECT * FROM messages WHERE id = ?').get(Number(params.id));
   if (!m || m.sender_id !== user.id) throw notFound('Message not found');
-  q('UPDATE messages SET deleted = 1, body = ?, media_id = NULL WHERE id = ?').run('', m.id);
+  q('UPDATE messages SET deleted = 1, body = ?, media_id = NULL, meta = NULL WHERE id = ?').run('', m.id);
   q('DELETE FROM reactions WHERE message_id = ?').run(m.id);
   const out = messageOut(q('SELECT * FROM messages WHERE id = ?').get(m.id));
   sendToConversation(m.conversation_id, { type: 'message.updated', message: out });
@@ -771,11 +908,7 @@ route('POST', '/api/media', async ({ user, req }) => {
 route('GET', '/api/media/:id', ({ user, params, res, req }) => {
   const m = q('SELECT * FROM media WHERE id = ?').get(params.id);
   if (!m) throw notFound();
-  const allowed =
-    m.uploader_id === user.id ||
-    q('SELECT 1 FROM users WHERE avatar_media = ?').get(m.id) ||
-    q(`SELECT 1 FROM conversations c JOIN members mb ON mb.conversation_id = c.id WHERE c.avatar_media = ? AND mb.user_id = ?`).get(m.id, user.id) ||
-    q(`SELECT 1 FROM messages msg JOIN members mb ON mb.conversation_id = msg.conversation_id WHERE msg.media_id = ? AND mb.user_id = ?`).get(m.id, user.id);
+  const allowed = canSeeMedia(m, user.id);
   if (!allowed) throw notFound();
   const file = path.join(MEDIA_DIR(), m.id);
   if (!fs.existsSync(file)) throw notFound();
@@ -805,5 +938,160 @@ route('GET', '/api/media/:id', ({ user, params, res, req }) => {
   res.writeHead(200, { ...headers, 'content-length': m.size });
   fs.createReadStream(file).pipe(res);
 });
+
+// ── search ──
+route('GET', '/api/search', ({ user, query }) => {
+  const text = String(query.q || '').trim();
+  if (text.length < 2) return { results: [] };
+  const like = `%${text.replace(/[\\%_]/g, (c) => '\\' + c)}%`;
+  const rows = q(
+    `SELECT msg.* FROM messages msg JOIN members mb ON mb.conversation_id = msg.conversation_id
+      WHERE mb.user_id = ? AND msg.deleted = 0 AND msg.kind != 'system' AND msg.body LIKE ? ESCAPE '\\'
+      ORDER BY msg.id DESC LIMIT 60`,
+  ).all(user.id, like);
+  return { results: rows.map(messageOut) };
+});
+
+// ── stickers ──
+route('GET', '/api/stickers', ({ user }) =>
+  q('SELECT id, media_id, created_at FROM stickers WHERE user_id = ? ORDER BY created_at DESC').all(user.id)
+    .map((r) => ({ id: r.id, media: r.media_id, createdAt: r.created_at })),
+);
+
+route('POST', '/api/stickers', ({ user, body }) => {
+  const m = requireMedia(body.media, user.id);
+  if (!m.mime.startsWith('image/')) throw bad('Stickers have to be pictures');
+  if (q('SELECT COUNT(*) AS n FROM stickers WHERE user_id = ?').get(user.id).n >= 300) throw bad('You have loads of stickers already (300 max)');
+  q('INSERT OR IGNORE INTO stickers (user_id, media_id, created_at) VALUES (?, ?, ?)').run(user.id, m.id, Date.now());
+  const r = q('SELECT id, media_id, created_at FROM stickers WHERE user_id = ? AND media_id = ?').get(user.id, m.id);
+  return { id: r.id, media: r.media_id, createdAt: r.created_at };
+});
+
+route('DELETE', '/api/stickers/:id', ({ user, params }) => {
+  const r = q('SELECT * FROM stickers WHERE id = ? AND user_id = ?').get(Number(params.id), user.id);
+  if (!r) throw notFound('Sticker not found');
+  q('DELETE FROM stickers WHERE id = ?').run(r.id);
+  deleteMediaIfUnused(r.media_id);
+  return { ok: true };
+});
+
+// ── GIFs (Giphy, proxied so phones never need the key) ──
+route('GET', '/api/gifs', async ({ query }) => {
+  if (!gifsEnabled()) throw new HttpError(503, 'GIFs aren’t set up on this server yet', 'gifs_off');
+  try {
+    return await findGifs(String(query.q || '').trim(), query.offset);
+  } catch (e) {
+    throw new HttpError(502, 'Couldn’t reach Giphy, try again');
+  }
+});
+
+route('POST', '/api/conversations/:id/gif', async ({ user, params, body }) => {
+  const convId = Number(params.id);
+  requireMember(convId, user.id);
+  const clientId = str(body.clientId, 64, 'clientId') || null;
+  if (clientId) {
+    const dup = q('SELECT * FROM messages WHERE sender_id = ? AND client_id = ?').get(user.id, clientId);
+    if (dup) return messageOut(dup);
+  }
+  let gif;
+  try {
+    gif = await downloadGif(String(body.url || ''));
+  } catch (e) {
+    throw bad('Couldn’t get that GIF');
+  }
+  const mediaId = saveMediaBuffer(gif.body, gif.mime, 'gif.gif', user.id);
+  return sendMessage(user.id, convId, { clientId, media: mediaId, replyTo: body.replyTo }).message;
+});
+
+// ── admin ──
+function requireServerAdmin(user) {
+  if (!user.is_admin) throw forbidden('Only server admins can do that');
+}
+
+route('GET', '/api/admin/overview', ({ user }) => {
+  requireServerAdmin(user);
+  const count = (sql) => q(sql).get().n;
+  let dbBytes = 0;
+  try {
+    dbBytes = fs.statSync(path.join(config.dataDir, 'bants.db')).size;
+  } catch {}
+  return {
+    users: count('SELECT COUNT(*) AS n FROM users'),
+    conversations: count('SELECT COUNT(*) AS n FROM conversations'),
+    messages: count("SELECT COUNT(*) AS n FROM messages WHERE kind != 'system'"),
+    mediaFiles: count('SELECT COUNT(*) AS n FROM media'),
+    mediaBytes: q('SELECT COALESCE(SUM(size), 0) AS n FROM media').get().n,
+    dbBytes,
+    push: !!config.fcmServiceAccount,
+    gifs: gifsEnabled(),
+    ...registrationSettings(),
+  };
+});
+
+route('GET', '/api/admin/users', ({ user }) => {
+  requireServerAdmin(user);
+  return q(
+    `SELECT u.*, (SELECT COUNT(*) FROM messages m WHERE m.sender_id = u.id) AS message_count
+       FROM users u ORDER BY u.created_at`,
+  ).all().map((u) => ({
+    id: u.id,
+    username: u.username,
+    displayName: u.display_name,
+    avatar: u.avatar_media,
+    isAdmin: !!u.is_admin,
+    createdAt: u.created_at,
+    lastSeen: u.last_seen,
+    online: isOnline(u.id),
+    messages: u.message_count,
+  }));
+});
+
+route('PATCH', '/api/admin/settings', ({ user, body }) => {
+  requireServerAdmin(user);
+  if (body.inviteCode !== undefined) setSetting('inviteCode', String(body.inviteCode || '').trim().slice(0, 64));
+  if (body.allowRegistration !== undefined) setSetting('allowRegistration', body.allowRegistration ? 'true' : 'false');
+  return registrationSettings();
+});
+
+route('POST', '/api/admin/users/:id/reset-password', async ({ user, params }) => {
+  requireServerAdmin(user);
+  const target = getUser(Number(params.id));
+  if (!target) throw notFound('User not found');
+  const words = ['banter', 'kebab', 'pigeon', 'crumpet', 'wombat', 'trifle', 'noodle', 'gravy', 'biscuit', 'puddle', 'goblin', 'pickle'];
+  const pick = () => words[crypto.randomInt(words.length)];
+  const password = `${pick()}-${pick()}-${crypto.randomInt(100, 1000)}`;
+  q('UPDATE users SET password_hash = ? WHERE id = ?').run(await hashPassword(password), target.id);
+  disconnect(target.id);
+  q('DELETE FROM sessions WHERE user_id = ?').run(target.id);
+  return { password };
+});
+
+route('POST', '/api/admin/users/:id/admin', ({ user, params, body }) => {
+  requireServerAdmin(user);
+  const target = getUser(Number(params.id));
+  if (!target) throw notFound('User not found');
+  if (!body.admin && target.id === user.id) throw bad('You can’t remove your own admin rights');
+  q('UPDATE users SET is_admin = ? WHERE id = ?').run(body.admin ? 1 : 0, target.id);
+  return { ok: true };
+});
+
+route('DELETE', '/api/admin/users/:id', ({ user, params }) => {
+  requireServerAdmin(user);
+  const target = getUser(Number(params.id));
+  if (!target) throw notFound('User not found');
+  if (target.id === user.id) throw bad('Delete your own account from the app instead');
+  const convIds = q('SELECT conversation_id FROM members WHERE user_id = ?').all(target.id).map((r) => r.conversation_id);
+  disconnect(target.id);
+  q('DELETE FROM users WHERE id = ?').run(target.id);
+  for (const id of convIds) broadcastConversation(id);
+  return { ok: true };
+});
+
+const ADMIN_HTML = new URL('./admin.html', import.meta.url);
+route('GET', '/admin', ({ res }) => {
+  const html = fs.readFileSync(ADMIN_HTML);
+  res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store', 'x-frame-options': 'DENY' });
+  res.end(html);
+}, { auth: false });
 
 export { getUser, conversationOut };
