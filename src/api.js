@@ -889,7 +889,7 @@ route('POST', '/api/messages/:id/react', ({ user, params, body }) => {
   if (!m || m.deleted || m.kind === 'system') throw notFound('Message not found');
   requireMember(m.conversation_id, user.id);
   const emoji = typeof body.emoji === 'string' ? body.emoji.trim() : '';
-  if (!emoji || emoji.length > 16) throw bad('Pick an emoji');
+  if (!emoji || emoji.length > 32) throw bad('Pick an emoji'); // room for family and flag emojis
   const existing = q('SELECT emoji FROM reactions WHERE message_id = ? AND user_id = ?').get(m.id, user.id);
   if (existing && existing.emoji === emoji) {
     q('DELETE FROM reactions WHERE message_id = ? AND user_id = ?').run(m.id, user.id);
