@@ -89,7 +89,7 @@ CREATE TABLE IF NOT EXISTS messages (
   conversation_id INTEGER NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
   sender_id       INTEGER REFERENCES users(id) ON DELETE SET NULL,
   client_id       TEXT,
-  kind            TEXT NOT NULL DEFAULT 'text' CHECK (kind IN ('text','image','video','audio','file','sticker','system')),
+  kind            TEXT NOT NULL DEFAULT 'text' CHECK (kind IN ('text','image','video','audio','file','sticker','system','poll','location')),
   body            TEXT NOT NULL DEFAULT '',
   media_id        TEXT,
   reply_to        INTEGER,
@@ -176,6 +176,59 @@ if (db.prepare('PRAGMA user_version').get().user_version < 1) {
 }
 db.exec('CREATE INDEX IF NOT EXISTS idx_messages_expiry ON messages(expires_at) WHERE expires_at IS NOT NULL');
 // Messages their sender unsent. Kept (ids only, no content) so phones that were offline remove them too.
+if (db.prepare('PRAGMA user_version').get().user_version < 2) {
+  // v2: polls and location messages. Rebuild messages so its CHECK allows the new kinds.
+  const sql = db.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'messages'").get().sql;
+  if (!sql.includes("'poll'")) {
+    db.exec(`
+      PRAGMA foreign_keys = OFF;
+      BEGIN;
+      CREATE TABLE messages_new (
+        id              INTEGER PRIMARY KEY,
+        conversation_id INTEGER NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+        sender_id       INTEGER REFERENCES users(id) ON DELETE SET NULL,
+        client_id       TEXT,
+        kind            TEXT NOT NULL DEFAULT 'text' CHECK (kind IN ('text','image','video','audio','file','sticker','system','poll','location')),
+        body            TEXT NOT NULL DEFAULT '',
+        media_id        TEXT,
+        reply_to        INTEGER,
+        created_at      INTEGER NOT NULL,
+        edited_at       INTEGER,
+        deleted         INTEGER NOT NULL DEFAULT 0,
+        meta            TEXT,
+        expires_at      INTEGER,
+        UNIQUE(sender_id, client_id)
+      );
+      INSERT INTO messages_new SELECT id, conversation_id, sender_id, client_id, kind, body, media_id, reply_to, created_at, edited_at, deleted, meta, expires_at FROM messages;
+      DROP TABLE messages;
+      ALTER TABLE messages_new RENAME TO messages;
+      CREATE INDEX IF NOT EXISTS idx_messages_conv ON messages(conversation_id, id);
+      CREATE INDEX IF NOT EXISTS idx_messages_expiry ON messages(expires_at) WHERE expires_at IS NOT NULL;
+      COMMIT;
+      PRAGMA foreign_keys = ON;
+    `);
+  }
+  db.exec('PRAGMA user_version = 2');
+}
+
+// Poll votes: one row per person per option they picked.
+db.exec(`CREATE TABLE IF NOT EXISTS poll_votes (
+  message_id INTEGER NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+  user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  option_id  INTEGER NOT NULL,
+  at         INTEGER NOT NULL,
+  PRIMARY KEY (message_id, user_id, option_id)
+)`);
+// When each person's delivered/read pointer moved, so "Message info" can show times.
+db.exec(`CREATE TABLE IF NOT EXISTS receipt_log (
+  conversation_id INTEGER NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+  user_id         INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  kind            TEXT NOT NULL CHECK (kind IN ('delivered','read')),
+  upto            INTEGER NOT NULL,
+  at              INTEGER NOT NULL
+)`);
+db.exec('CREATE INDEX IF NOT EXISTS idx_receipt_log ON receipt_log(conversation_id, user_id, kind, upto)');
+
 db.exec(`CREATE TABLE IF NOT EXISTS unsent (
   message_id      INTEGER PRIMARY KEY,
   conversation_id INTEGER NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,

@@ -306,6 +306,51 @@ try {
     assert.equal(page.data.messages[0].meta, null);
   });
 
+  await step('polls: vote, change vote, multi-choice', async () => {
+    const p = await api('POST', `/api/conversations/${convId}/messages`, { token: alice.token, body: { poll: { question: 'Pub or takeaway?', options: ['Pub', 'Takeaway', 'Both'] } } });
+    assert.equal(p.data.kind, 'poll');
+    assert.equal(p.data.meta.poll.options.length, 3);
+    let v = await api('POST', `/api/messages/${p.data.id}/vote`, { token: bob.token, body: { optionIds: [1, 2] } });
+    assert.deepEqual(v.data.meta.poll.options.map((o) => o.voterIds), [[bob.user.id], [], []], 'single-choice keeps one vote');
+    await aliceWs.waitFor((e) => e.type === 'message.updated' && e.message.id === p.data.id);
+    v = await api('POST', `/api/messages/${p.data.id}/vote`, { token: bob.token, body: { optionIds: [3] } });
+    assert.deepEqual(v.data.meta.poll.options[2].voterIds, [bob.user.id]);
+    const bad = await api('POST', `/api/conversations/${convId}/messages`, { token: alice.token, body: { poll: { question: 'One?', options: ['only'] } } });
+    assert.equal(bad.status, 400);
+  });
+
+  await step('forwarding copies a message and marks it', async () => {
+    const g = await api('POST', '/api/conversations', { token: alice.token, body: { type: 'group', name: 'Fwd', memberIds: [bob.user.id] } });
+    const src = (await api('POST', `/api/conversations/${convId}/messages`, { token: bob.token, body: { body: 'forward me' } })).data;
+    const f = await api('POST', `/api/messages/${src.id}/forward`, { token: alice.token, body: { conversationIds: [g.data.id] } });
+    assert.equal(f.data.messages[0].body, 'forward me');
+    assert.equal(f.data.messages[0].meta.forwarded, true);
+    assert.equal(f.data.messages[0].senderId, alice.user.id);
+  });
+
+  await step('message info shows read times; streaks count', async () => {
+    const m = (await api('POST', `/api/conversations/${convId}/messages`, { token: alice.token, body: { body: 'seen it?' } })).data;
+    await api('POST', `/api/conversations/${convId}/receipts`, { token: bob.token, body: { read: m.id } });
+    const info = await api('GET', `/api/messages/${m.id}/info`, { token: alice.token });
+    const b = info.data.members.find((x) => x.userId === bob.user.id);
+    assert.equal(b.read, true);
+    assert.ok(b.readAt > 0);
+    const notMine = await api('GET', `/api/messages/${m.id}/info`, { token: bob.token });
+    assert.equal(notMine.status, 404);
+    const conv = await api('GET', `/api/conversations/${convId}`, { token: alice.token });
+    assert.equal(conv.data.streak, 1, 'both sent today');
+  });
+
+  await step('location: one-off and live updates', async () => {
+    const l = await api('POST', `/api/conversations/${convId}/messages`, { token: alice.token, body: { location: { lat: 51.5, lng: -0.12, liveMinutes: 15 } } });
+    assert.equal(l.data.kind, 'location');
+    assert.ok(l.data.meta.location.liveUntil > Date.now());
+    const u = await api('PATCH', `/api/messages/${l.data.id}/location`, { token: alice.token, body: { lat: 51.6, lng: -0.1 } });
+    assert.equal(u.data.meta.location.lat, 51.6);
+    const stop = await api('PATCH', `/api/messages/${l.data.id}/location`, { token: alice.token, body: { stop: true } });
+    assert.ok(stop.data.meta.location.liveUntil <= Date.now());
+  });
+
   await step('group chat: create, message, add, leave', async () => {
     // bob and carol need a contact link for later; alice is contacts with both.
     const g = await api('POST', '/api/conversations', { token: alice.token, body: { type: 'group', name: 'Gang', memberIds: [bob.user.id] } });

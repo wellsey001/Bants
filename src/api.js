@@ -82,6 +82,11 @@ export function messageOut(m) {
     reactions = [...grouped].map(([emoji, userIds]) => ({ emoji, userIds }));
   }
   const media = !m.deleted && m.media_id ? q('SELECT mime, size, filename FROM media WHERE id = ?').get(m.media_id) : null;
+  const meta = m.deleted ? null : parseMeta(m.meta);
+  if (meta?.poll) {
+    const votes = q('SELECT user_id, option_id FROM poll_votes WHERE message_id = ? ORDER BY at').all(m.id);
+    meta.poll.options = meta.poll.options.map((o) => ({ ...o, voterIds: votes.filter((v) => v.option_id === o.id).map((v) => v.user_id) }));
+  }
   return {
     id: m.id,
     conversationId: m.conversation_id,
@@ -96,7 +101,7 @@ export function messageOut(m) {
     deleted: !!m.deleted,
     reactions,
     mediaInfo: media ? { mime: media.mime, size: media.size, filename: media.filename } : null,
-    meta: m.deleted ? null : parseMeta(m.meta),
+    meta,
     expiresAt: m.expires_at ?? null,
   };
 }
@@ -126,6 +131,7 @@ function conversationOut(convId, viewerId) {
     pinned: !!me?.pinned,
     archived: !!me?.archived,
     disappearAfter: c.disappear_after || 0,
+    streak: c.type === 'direct' ? streakFor(convId, memberRows.map((r) => r.id)) : 0,
     unreadCount: unread,
     lastMessage: last ? messageOut(last) : null,
     members: memberRows.map((r) => ({
@@ -138,6 +144,41 @@ function conversationOut(convId, viewerId) {
 }
 
 // ───────────────────────── helpers ─────────────────────────
+
+/** Local calendar day (server time zone, set TZ to change) as "YYYY-MM-DD". */
+function dayKey(ms) {
+  const d = new Date(ms);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+
+/**
+ * Chat streak: days in a row where everyone in a direct chat sent at least one message.
+ * Counts back from today (or from yesterday, so a streak isn't lost before today's chat).
+ */
+function streakFor(convId, userIds) {
+  if (userIds.length !== 2) return 0;
+  const since = Date.now() - 400 * 86_400_000;
+  const rows = q(
+    `SELECT sender_id, created_at FROM messages
+      WHERE conversation_id = ? AND created_at > ? AND kind != 'system' AND sender_id IS NOT NULL`,
+  ).all(convId, since);
+  const days = new Map(); // day -> set of senders
+  for (const r of rows) {
+    const k = dayKey(r.created_at);
+    if (!days.has(k)) days.set(k, new Set());
+    days.get(k).add(r.sender_id);
+  }
+  const both = (k) => userIds.every((u) => days.get(k)?.has(u));
+  const day = new Date();
+  day.setHours(12, 0, 0, 0);
+  if (!both(dayKey(day.getTime()))) day.setDate(day.getDate() - 1);
+  let n = 0;
+  while (both(dayKey(day.getTime()))) {
+    n++;
+    day.setDate(day.getDate() - 1);
+  }
+  return n;
+}
 
 function areContacts(a, b) {
   return !!q('SELECT 1 FROM contacts WHERE user_id = ? AND contact_id = ?').get(a, b);
@@ -284,9 +325,36 @@ export function sendMessage(userId, convId, input) {
     if (dup) return { message: messageOut(dup), duplicate: true };
   }
 
-  const body = str(input.body ?? input.text ?? '', 10_000, 'body') || '';
+  let body = str(input.body ?? input.text ?? '', 10_000, 'body') || '';
   const media = requireMedia(input.media, userId);
+  const extra = {};
   let kind = 'text';
+  if (input.poll) {
+    const p = input.poll;
+    const question = str(p.question, 200, 'question');
+    const options = Array.isArray(p.options) ? p.options.map((o) => str(typeof o === 'string' ? o : o?.text, 100, 'option')).filter(Boolean) : [];
+    if (!question) throw bad('Ask a question');
+    if (options.length < 2 || options.length > 12) throw bad('A poll needs 2 to 12 options');
+    extra.poll = { question, multi: !!p.multi, options: options.map((text, i) => ({ id: i + 1, text })) };
+    kind = 'poll';
+    body = question;
+  } else if (input.location) {
+    const l = input.location;
+    const lat = Number(l.lat);
+    const lng = Number(l.lng);
+    if (!Number.isFinite(lat) || !Number.isFinite(lng) || Math.abs(lat) > 90 || Math.abs(lng) > 180) throw bad('Bad location');
+    const liveMinutes = Math.min(Math.max(Number(l.liveMinutes) || 0, 0), 8 * 60);
+    extra.location = {
+      lat, lng,
+      accuracy: Number(l.accuracy) || null,
+      label: str(l.label, 200, 'label') || null,
+      liveUntil: liveMinutes ? Date.now() + liveMinutes * 60_000 : null,
+      updatedAt: Date.now(),
+    };
+    kind = 'location';
+    body = extra.location.label || (liveMinutes ? 'Live location' : 'Location');
+  }
+  if (input.forwarded) extra.forwarded = true;
   if (media && input.kind === 'sticker' && media.mime.startsWith('image/')) {
     kind = 'sticker';
   } else if (media) {
@@ -298,7 +366,7 @@ export function sendMessage(userId, convId, input) {
           ? 'audio'
           : 'file';
   }
-  if (!body && !media) throw bad('Message is empty');
+  if (!body && !media && kind === 'text') throw bad('Message is empty');
 
   let replyTo = null;
   if (input.replyTo !== undefined && input.replyTo !== null) {
@@ -313,7 +381,7 @@ export function sendMessage(userId, convId, input) {
   ).all(convId, userId);
   const named = new Set([...body.matchAll(/@([a-z0-9_.]{3,24})/gi)].map((x) => x[1].toLowerCase()));
   const mentions = memberRows.filter((r) => named.has(r.username.toLowerCase())).map((r) => r.id);
-  const meta = mentions.length ? { mentions } : null;
+  const meta = mentions.length || Object.keys(extra).length ? { ...(mentions.length ? { mentions } : {}), ...extra } : null;
 
   const now = Date.now();
   const expiresAt = conv.disappear_after > 0 ? now + conv.disappear_after * 1000 : null;
@@ -401,6 +469,10 @@ export function updateReceipts(userId, convId, { delivered, read }) {
   newDelivered = Math.max(newDelivered, newRead); // read implies delivered
   if (newRead === m.last_read && newDelivered === m.last_delivered) return;
   q('UPDATE members SET last_read = ?, last_delivered = ? WHERE conversation_id = ? AND user_id = ?').run(newRead, newDelivered, convId, userId);
+  const now = Date.now();
+  const log = q('INSERT INTO receipt_log (conversation_id, user_id, kind, upto, at) VALUES (?, ?, ?, ?, ?)');
+  if (newDelivered > m.last_delivered) log.run(convId, userId, 'delivered', newDelivered, now);
+  if (newRead > m.last_read) log.run(convId, userId, 'read', newRead, now);
   sendToConversation(convId, {
     type: 'receipt',
     conversationId: convId,
@@ -881,6 +953,96 @@ route('DELETE', '/api/messages/:id', ({ user, params }) => {
     pushToUser(o.user_id, { type: 'unsend', conversationId: m.conversation_id, messageId: m.id }).catch(() => {});
   }
   return { ok: true, id: m.id };
+});
+
+/** Vote in a poll. Send the full set of options you want; an empty list takes your vote back. */
+route('POST', '/api/messages/:id/vote', ({ user, params, body }) => {
+  const m = q('SELECT * FROM messages WHERE id = ?').get(Number(params.id));
+  if (!m || m.deleted || m.kind !== 'poll') throw notFound('Poll not found');
+  requireMember(m.conversation_id, user.id);
+  const poll = parseMeta(m.meta)?.poll;
+  const valid = new Set(poll.options.map((o) => o.id));
+  let picks = [...new Set((Array.isArray(body.optionIds) ? body.optionIds : []).map(Number))].filter((id) => valid.has(id));
+  if (!poll.multi) picks = picks.slice(0, 1);
+  const now = Date.now();
+  tx(() => {
+    q('DELETE FROM poll_votes WHERE message_id = ? AND user_id = ?').run(m.id, user.id);
+    const add = q('INSERT INTO poll_votes (message_id, user_id, option_id, at) VALUES (?, ?, ?, ?)');
+    for (const id of picks) add.run(m.id, user.id, id, now);
+  });
+  const out = messageOut(m);
+  sendToConversation(m.conversation_id, { type: 'message.updated', message: out });
+  return out;
+});
+
+/** Send a copy of a message to other chats, marked as forwarded. */
+route('POST', '/api/messages/:id/forward', ({ user, params, body }) => {
+  const m = q('SELECT * FROM messages WHERE id = ?').get(Number(params.id));
+  if (!m || m.deleted || m.kind === 'system') throw notFound('Message not found');
+  requireMember(m.conversation_id, user.id);
+  const targets = [...new Set((Array.isArray(body.conversationIds) ? body.conversationIds : []).map(Number))].slice(0, 20);
+  if (!targets.length) throw bad('Pick a chat');
+  const meta = parseMeta(m.meta) || {};
+  const input = {
+    body: m.kind === 'poll' || m.kind === 'location' ? '' : m.body,
+    media: m.media_id || undefined,
+    kind: m.kind === 'sticker' ? 'sticker' : undefined,
+    forwarded: true,
+  };
+  if (meta.poll) input.poll = { question: meta.poll.question, multi: meta.poll.multi, options: meta.poll.options.map((o) => o.text) };
+  if (meta.location) input.location = { lat: meta.location.lat, lng: meta.location.lng, label: meta.location.label }; // never live
+  const sent = [];
+  for (const cid of targets) {
+    try {
+      sent.push(sendMessage(user.id, cid, input).message);
+    } catch (e) {
+      // Skip chats you're not in or can't message; forward to the rest.
+    }
+  }
+  if (!sent.length) throw bad('Couldn’t forward to those chats');
+  return { messages: sent };
+});
+
+/** Who's received and read your message, and when. Only the sender can see this. */
+route('GET', '/api/messages/:id/info', ({ user, params }) => {
+  const m = q('SELECT * FROM messages WHERE id = ?').get(Number(params.id));
+  if (!m || m.sender_id !== user.id) throw notFound('Message not found');
+  const firstAt = q('SELECT MIN(at) AS at FROM receipt_log WHERE conversation_id = ? AND user_id = ? AND kind = ? AND upto >= ?');
+  const members = q('SELECT user_id, last_read, last_delivered FROM members WHERE conversation_id = ? AND user_id != ?')
+    .all(m.conversation_id, user.id)
+    .map((r) => {
+      const read = r.last_read >= m.id;
+      const delivered = r.last_delivered >= m.id;
+      return {
+        userId: r.user_id,
+        delivered,
+        read,
+        deliveredAt: delivered ? firstAt.get(m.conversation_id, r.user_id, 'delivered', m.id).at ?? null : null,
+        readAt: read ? firstAt.get(m.conversation_id, r.user_id, 'read', m.id).at ?? null : null,
+      };
+    });
+  return { messageId: m.id, sentAt: m.created_at, members };
+});
+
+/** Live location: the sender moves the pin, or stops sharing early. */
+route('PATCH', '/api/messages/:id/location', ({ user, params, body }) => {
+  const m = q('SELECT * FROM messages WHERE id = ?').get(Number(params.id));
+  if (!m || m.deleted || m.kind !== 'location' || m.sender_id !== user.id) throw notFound('Location not found');
+  const meta = parseMeta(m.meta);
+  const loc = meta.location;
+  if (body.stop) {
+    loc.liveUntil = Math.min(loc.liveUntil || 0, Date.now());
+  } else {
+    if (!loc.liveUntil || loc.liveUntil < Date.now()) throw bad('This location isn’t live any more');
+    const lat = Number(body.lat);
+    const lng = Number(body.lng);
+    if (!Number.isFinite(lat) || !Number.isFinite(lng) || Math.abs(lat) > 90 || Math.abs(lng) > 180) throw bad('Bad location');
+    Object.assign(loc, { lat, lng, accuracy: Number(body.accuracy) || null, updatedAt: Date.now() });
+  }
+  q('UPDATE messages SET meta = ? WHERE id = ?').run(JSON.stringify(meta), m.id);
+  const out = messageOut(q('SELECT * FROM messages WHERE id = ?').get(m.id));
+  sendToConversation(m.conversation_id, { type: 'message.updated', message: out });
+  return out;
 });
 
 /** One reaction per person per message. Sending the same emoji again removes it. */
