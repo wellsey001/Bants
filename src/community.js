@@ -306,9 +306,9 @@ function embedText(embeds) {
   const out = [];
   for (const e of (Array.isArray(embeds) ? embeds : []).slice(0, 5)) {
     if (!e || typeof e !== 'object') continue;
-    if (e.title) out.push(`**${String(e.title).slice(0, 256)}**${e.url ? ` ${e.url}` : ''}`);
+    if (e.title) out.push(`${String(e.title).slice(0, 256)}${e.url ? ` ${e.url}` : ''}`);
     if (e.description) out.push(String(e.description).slice(0, 2000));
-    for (const f of (Array.isArray(e.fields) ? e.fields : []).slice(0, 15)) if (f?.name || f?.value) out.push(`${f.name ? `**${String(f.name).slice(0, 256)}:** ` : ''}${String(f.value || '').slice(0, 1024)}`);
+    for (const f of (Array.isArray(e.fields) ? e.fields : []).slice(0, 15)) if (f?.name || f?.value) out.push(`${f.name ? `${String(f.name).slice(0, 256)}: ` : ''}${String(f.value || '').slice(0, 1024)}`);
     if (e.footer?.text) out.push(String(e.footer.text).slice(0, 256));
   }
   return out.join('\n');
