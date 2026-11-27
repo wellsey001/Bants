@@ -8,7 +8,7 @@
 import crypto from 'node:crypto';
 import { config } from './config.js';
 import { q } from './db.js';
-import { sendToUser, sendToSession, isOnline } from './hub.js';
+import { sendToUser, sendToSession, isOnline, sessionOnline } from './hub.js';
 import { pushToUser } from './push.js';
 import { HttpError, route, getUser, addCallMessage, isBlocked } from './api.js';
 
@@ -219,6 +219,24 @@ route('GET', '/api/calls/:id', ({ user, params }) => {
   const caller = getUser(c.callerId);
   return { call: callOut(c), caller: { id: caller.id, displayName: caller.display_name, avatar: caller.avatar_media } };
 });
+
+/**
+ * A device dropped its connection. If it was on a call and doesn't come back within
+ * 30 seconds (a phone switching from Wi-Fi to mobile data reconnects much faster),
+ * treat it as hanging up, so nobody's left stuck "on a call".
+ */
+export function onSessionGone(userId, tokenHash) {
+  setTimeout(() => {
+    if (sessionOnline(userId, tokenHash)) return;
+    for (const c of [...calls.values()]) {
+      if (c.group) {
+        if (c.participants.get(userId) === tokenHash) leaveGroup(c, userId);
+      } else if ((c.callerId === userId && c.callerToken === tokenHash) || (c.calleeId === userId && c.calleeToken === tokenHash)) {
+        finish(c, 'hangup', userId);
+      }
+    }
+  }, 30_000).unref();
+}
 
 // Tidy up anything left hanging (e.g. both phones vanished mid-call).
 setInterval(() => {

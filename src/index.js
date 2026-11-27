@@ -16,7 +16,7 @@ import {
   sweepExpired,
 } from './api.js';
 import './push.js';
-import { handleCallMessage } from './calls.js';
+import { handleCallMessage, onSessionGone } from './calls.js';
 import { scheduleBackups } from './backup.js';
 
 const MAX_JSON = 1024 * 1024;
@@ -188,6 +188,7 @@ server.on('upgrade', (req, socket, head) => {
   conn.on('close', () => {
     q('UPDATE users SET last_seen = ? WHERE id = ?').run(Date.now(), userId);
     if (removeConnection(userId, entry)) notifyContactsPresence(userId, false);
+    onSessionGone(userId, session.tokenHash);
   });
 });
 

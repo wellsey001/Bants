@@ -24,6 +24,9 @@ export function removeConnection(userId, entry) {
 
 export const isOnline = (userId) => (connections.get(userId)?.size || 0) > 0;
 
+/** Is this signed-in device (session) connected right now? */
+export const sessionOnline = (userId, tokenHash) => [...(connections.get(userId) || [])].some((e) => e.tokenHash === tokenHash);
+
 export function sendToUser(userId, event, exceptTokenHash = null) {
   const set = connections.get(userId);
   if (!set) return;
