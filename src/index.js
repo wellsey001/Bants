@@ -16,6 +16,7 @@ import {
   sweepExpired,
 } from './api.js';
 import './push.js';
+import { sendChannelMessage, sendChannelTyping, markChannelRead, notifyServerPresence } from './servers.js';
 import { handleCallMessage, onSessionGone } from './calls.js';
 import { scheduleBackups } from './backup.js';
 
@@ -71,7 +72,7 @@ function send(res, status, data) {
 const server = http.createServer(async (req, res) => {
   res.setHeader('access-control-allow-origin', '*');
   res.setHeader('access-control-allow-headers', 'authorization, content-type, x-filename');
-  res.setHeader('access-control-allow-methods', 'GET, POST, PATCH, DELETE, OPTIONS');
+  res.setHeader('access-control-allow-methods', 'GET, POST, PUT, PATCH, DELETE, OPTIONS');
   if (req.method === 'OPTIONS') {
     res.writeHead(204);
     return res.end();
@@ -138,7 +139,10 @@ server.on('upgrade', (req, socket, head) => {
   const entry = { conn, tokenHash: session.tokenHash };
   const cameOnline = addConnection(userId, entry);
   q('UPDATE users SET last_seen = ? WHERE id = ?').run(Date.now(), userId);
-  if (cameOnline) notifyContactsPresence(userId, true);
+  if (cameOnline) {
+    notifyContactsPresence(userId, true);
+    notifyServerPresence(userId, true);
+  }
 
   const me = getUser(userId);
   conn.send({ type: 'ready', user: userOut(me, userId) });
@@ -161,6 +165,18 @@ server.on('upgrade', (req, socket, head) => {
         case 'receipt':
           updateReceipts(userId, Number(msg.conversationId), { delivered: msg.delivered, read: msg.read });
           break;
+        // Servers
+        case 'channel.typing':
+          sendChannelTyping(userId, Number(msg.channelId));
+          break;
+        case 'channel.read':
+          markChannelRead(userId, Number(msg.channelId), msg.messageId);
+          break;
+        case 'channel.send': {
+          const message = sendChannelMessage(userId, Number(msg.channelId), msg);
+          conn.send({ type: 'channel.ack', clientId: msg.clientId ?? null, message });
+          break;
+        }
         case 'message.send': {
           const { message } = sendMessage(userId, Number(msg.conversationId), msg);
           conn.send({ type: 'message.ack', clientId: msg.clientId ?? null, message });
@@ -187,7 +203,10 @@ server.on('upgrade', (req, socket, head) => {
 
   conn.on('close', () => {
     q('UPDATE users SET last_seen = ? WHERE id = ?').run(Date.now(), userId);
-    if (removeConnection(userId, entry)) notifyContactsPresence(userId, false);
+    if (removeConnection(userId, entry)) {
+      notifyContactsPresence(userId, false);
+      notifyServerPresence(userId, false);
+    }
     onSessionGone(userId, session.tokenHash);
   });
 });

@@ -4,7 +4,7 @@
 
 Self-hosted backend for **Bants**, a WhatsApp-style messaging app. It runs as one small Docker container on Unraid and has **no npm dependencies**. It uses Node 22's built-in SQLite, HTTP server and crypto.
 
-**Features:** accounts, usernames and friend codes, contact requests, 1:1 and group chats, real-time delivery over WebSocket, typing indicators, delivered/read receipts, online/last seen, photos/videos/files/voice notes, replies and reactions, GIFs and stickers, @mentions, link previews, disappearing messages, pinned and archived chats, message search, edit and delete for everyone, blocking, Android push notifications via Firebase, and an admin page.
+**Features:** accounts, Discord-style servers (channels, categories, threads, roles and permissions, invite links, moderation), usernames and friend codes, contact requests, 1:1 and group chats, real-time delivery over WebSocket, typing indicators, delivered/read receipts, online/last seen, photos/videos/files/voice notes, replies and reactions, GIFs and stickers, @mentions, link previews, disappearing messages, pinned and archived chats, message search, edit and delete for everyone, blocking, Android push notifications via Firebase, and an admin page.
 
 > Messages are stored unencrypted in the database on your server (`/data/bants.db`). Traffic is encrypted in transit by HTTPS through Cloudflare Tunnel.
 
@@ -104,6 +104,44 @@ docker run --rm -it -v /mnt/user/backups/bants:/backups -v /mnt/user/appdata/ban
 Enter the passphrase. Add a date (`2026-11-26`) after `/restored` to pick an older snapshot.
 Then point the stack's `/data` volume at `bants-restored` (or swap the folders) and start it again.
 
+## Servers
+
+Servers are Discord-style communities that sit alongside chats. In the app, one button switches between **Chats** and **Servers**. They use the same accounts, database and container, so there is nothing extra to set up. Updating the container adds the new tables, and existing chats aren't touched.
+
+- **Servers** have an owner, members, and an invite link (`/api/invites/<code>`) that can be limited by uses and time.
+- **Channels** are text, announcement or voice, grouped into **categories**. Text channels can have **threads**.
+- **Roles** carry permissions (see `src/permissions.js`). Every server has `@everyone`. A channel can override permissions for a role or a person, for example a private `#mods` channel or a read-only `#announcements`. Channels follow their category's overrides unless you change their own.
+- **Rules:** the owner and anyone with Administrator can do everything. Moderators can only kick, ban, time out or edit people and roles below their own top role. Nobody can give out permissions they don't have.
+- **Moderation:** kick, ban (optionally wiping their last 7 days of messages), timeout (read-only for up to 28 days), slowmode, pins, deleting others' messages, and an audit log.
+- **Messages:** replies, several attachments, multiple reactions per person, `<@user>` and `<@&role>` mentions, `@everyone` (only with permission), unread dots and red mention badges.
+
+Voice channels can be created now. Joining them comes in a later update.
+
+### Servers API (all need `Authorization: Bearer <token>`)
+
+| | |
+|---|---|
+| `GET/POST /api/servers` | Your servers / create one `{ name }` |
+| `GET/PATCH/DELETE /api/servers/:id` | View, edit `{ name, description, icon, banner, systemChannelId }`, delete (owner) |
+| `POST /api/servers/:id/leave`, `/transfer` | Leave / hand to `{ userId }` (owner) |
+| `PATCH /api/servers/:id/me` | Your own `{ muted, position }` |
+| `GET /api/servers/:id/members` | Member list |
+| `PATCH/DELETE /api/servers/:id/members/:userId` | `{ nickname, roleIds, timeoutUntil }` / kick |
+| `GET/POST/DELETE /api/servers/:id/bans[/:userId]` | Bans `{ reason, deleteMessageHours }` |
+| `POST/GET /api/servers/:id/invites` | Make `{ maxUses, expiresInHours }` / list |
+| `GET/POST/DELETE /api/invites/:code` | Preview / join / delete |
+| `POST /api/servers/:id/roles`, `PATCH/DELETE /api/roles/:id` | Roles `{ name, colour, permissions, hoist, mentionable, position }` |
+| `POST /api/servers/:id/channels`, `PATCH/DELETE /api/channels/:id` | Channels `{ name, type, parentId, topic, private, roleIds, slowmode, ... }` |
+| `GET/PUT/DELETE /api/channels/:id/overrides/:role\|member/:id` | Permission overrides `{ allow, deny }` |
+| `GET/POST /api/channels/:id/threads` | Threads `{ name, messageId }` |
+| `GET/POST /api/channels/:id/messages` | `?before=&after=&limit=` / send `{ body, replyTo, attachments, clientId }` |
+| `PATCH/DELETE /api/channel-messages/:id` | Edit / delete |
+| `PUT/DELETE /api/channel-messages/:id/reactions/:emoji`, `/pin` | Reactions, pins |
+| `GET /api/channels/:id/pins`, `POST /api/channels/:id/read`, `POST /api/servers/:id/read` | Pins, mark read |
+| `GET /api/servers/:id/search?q=`, `/audit-log` | Search, audit log |
+
+WebSocket: send `channel.send` `{ channelId, body, clientId }`, `channel.typing` `{ channelId }`, `channel.read` `{ channelId, messageId }`. You receive `channel.ack`, `channel.message` (with `mentioned`), `channel.message.update`, `channel.message.delete`, `channel.reaction`, `channel.typing`, `channel.read`, `channel.thread.create/update/delete`, `server.add`, `server.update` (your own fresh view whenever roles, channels or permissions change), `server.remove`, `server.member.add/update/remove` and `server.presence`.
+
 ## Admin page
 
 Open `https://your-domain/admin` and log in with your Bants account. The first account made on the server is the admin, and admins can make others admins too.
@@ -132,6 +170,7 @@ From the admin page you can:
 | `TURN_PORT` | `3478` | coturn's port |
 | `TRUST_PROXY` | `true` | Read real client IPs from Cloudflare headers |
 | `LOG_REQUESTS` | `false` | Log every HTTP request |
+| `MAX_SERVERS_PER_USER` | `25` | Most servers one person can own |
 
 ## Running locally / tests
 

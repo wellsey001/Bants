@@ -209,9 +209,13 @@ function str(v, max, field) {
   if (s.length > max) throw bad(`${field} is too long (max ${max})`);
   return s;
 }
-/** Whether someone may see a file: theirs, their sticker, an avatar, or used in one of their chats. */
+/** Extra checks other modules add (servers.js: server icons and channel attachments). */
+export const mediaAccessChecks = [];
+
+/** Whether someone may see a file: theirs, their sticker, an avatar, or used in one of their chats or servers. */
 function canSeeMedia(m, userId) {
   return (
+    mediaAccessChecks.some((check) => check(m.id, userId)) ||
     m.uploader_id === userId ||
     !!q('SELECT 1 FROM stickers WHERE media_id = ? AND user_id = ?').get(m.id, userId) ||
     !!q('SELECT 1 FROM users WHERE avatar_media = ?').get(m.id) ||
@@ -247,7 +251,9 @@ function deleteMediaIfUnused(id) {
     q('SELECT 1 FROM messages WHERE meta LIKE ? LIMIT 1').get(`%${id}%`) ||
     q('SELECT 1 FROM stickers WHERE media_id = ? LIMIT 1').get(id) ||
     q('SELECT 1 FROM users WHERE avatar_media = ? LIMIT 1').get(id) ||
-    q('SELECT 1 FROM conversations WHERE avatar_media = ? LIMIT 1').get(id);
+    q('SELECT 1 FROM conversations WHERE avatar_media = ? LIMIT 1').get(id) ||
+    q('SELECT 1 FROM channel_attachments WHERE media_id = ? LIMIT 1').get(id) ||
+    q('SELECT 1 FROM servers WHERE icon_media = ? OR banner_media = ? LIMIT 1').get(id, id);
   if (used) return;
   q('DELETE FROM media WHERE id = ?').run(id);
   fs.rmSync(path.join(MEDIA_DIR(), id), { force: true });
@@ -511,6 +517,8 @@ route('GET', '/api/server', () => {
     calls: true,
     callRelay: !!process.env.TURN_SECRET,
     unsend: true,
+    // The app shows the Chats / Servers switch when this is true.
+    servers: true,
   };
 }, { auth: false });
 
@@ -609,12 +617,22 @@ route('POST', '/api/me/push-token', ({ body, tokenHash }) => {
   return { ok: true };
 });
 
+/** Before an account is deleted: servers it owns go with it, so tell their members. */
+function announceOwnedServersGone(userId) {
+  for (const { id } of q('SELECT id FROM servers WHERE owner_id = ?').all(userId)) {
+    for (const { user_id } of q('SELECT user_id FROM server_members WHERE server_id = ? AND user_id != ?').all(id, userId)) {
+      sendToUser(user_id, { type: 'server.remove', serverId: id });
+    }
+  }
+}
+
 route('DELETE', '/api/me', async ({ user, body }) => {
   if (!(await verifyPassword(String(body.password || ''), user.password_hash))) {
     throw new HttpError(401, 'Password is wrong', 'bad_credentials');
   }
   const convIds = q('SELECT conversation_id FROM members WHERE user_id = ?').all(user.id).map((r) => r.conversation_id);
   disconnect(user.id);
+  announceOwnedServersGone(user.id);
   q('DELETE FROM users WHERE id = ?').run(user.id);
   for (const id of convIds) broadcastConversation(id);
   return { ok: true };
@@ -1294,6 +1312,7 @@ route('DELETE', '/api/admin/users/:id', ({ user, params }) => {
   if (target.id === user.id) throw bad('Delete your own account from the app instead');
   const convIds = q('SELECT conversation_id FROM members WHERE user_id = ?').all(target.id).map((r) => r.conversation_id);
   disconnect(target.id);
+  announceOwnedServersGone(target.id);
   q('DELETE FROM users WHERE id = ?').run(target.id);
   for (const id of convIds) broadcastConversation(id);
   return { ok: true };

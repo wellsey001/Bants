@@ -236,6 +236,176 @@ db.exec(`CREATE TABLE IF NOT EXISTS unsent (
 )`);
 db.exec('CREATE INDEX IF NOT EXISTS idx_unsent_conv ON unsent(conversation_id, message_id)');
 
+// ───────────── Servers (Discord-style communities) ─────────────
+// Chats above stay exactly as they were. Servers are a separate area of the app with their own
+// channels, roles and messages. Who can do what is worked out in permissions.js.
+db.exec(`
+CREATE TABLE IF NOT EXISTS servers (
+  id            INTEGER PRIMARY KEY,
+  name          TEXT NOT NULL,
+  description   TEXT NOT NULL DEFAULT '',
+  icon_media    TEXT,
+  banner_media  TEXT,
+  owner_id      INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, -- owner always has every permission
+  system_channel_id INTEGER,                                           -- where "X joined" messages go
+  created_at    INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS server_members (
+  server_id     INTEGER NOT NULL REFERENCES servers(id) ON DELETE CASCADE,
+  user_id       INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  nickname      TEXT,
+  joined_at     INTEGER NOT NULL,
+  timeout_until INTEGER,                       -- read-only until this time
+  position      INTEGER NOT NULL DEFAULT 0,    -- order in the user's server list
+  muted         INTEGER NOT NULL DEFAULT 0,    -- no push notifications from this server
+  PRIMARY KEY (server_id, user_id)
+);
+CREATE INDEX IF NOT EXISTS idx_server_members_user ON server_members(user_id);
+
+-- Every server has one is_default role (@everyone) that everyone has without a member_roles row.
+CREATE TABLE IF NOT EXISTS roles (
+  id          INTEGER PRIMARY KEY,
+  server_id   INTEGER NOT NULL REFERENCES servers(id) ON DELETE CASCADE,
+  name        TEXT NOT NULL,
+  colour      INTEGER,                         -- 0xRRGGBB, NULL = no colour
+  position    INTEGER NOT NULL DEFAULT 0,      -- higher = more senior
+  permissions INTEGER NOT NULL DEFAULT 0,      -- bitfield, see permissions.js
+  hoist       INTEGER NOT NULL DEFAULT 0,      -- list members with this role separately
+  mentionable INTEGER NOT NULL DEFAULT 0,
+  is_default  INTEGER NOT NULL DEFAULT 0,
+  created_at  INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_roles_server ON roles(server_id, position);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_roles_default ON roles(server_id) WHERE is_default = 1;
+
+CREATE TABLE IF NOT EXISTS member_roles (
+  server_id INTEGER NOT NULL,
+  user_id   INTEGER NOT NULL,
+  role_id   INTEGER NOT NULL REFERENCES roles(id) ON DELETE CASCADE,
+  PRIMARY KEY (server_id, user_id, role_id),
+  FOREIGN KEY (server_id, user_id) REFERENCES server_members(server_id, user_id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS server_invites (
+  code       TEXT PRIMARY KEY,
+  server_id  INTEGER NOT NULL REFERENCES servers(id) ON DELETE CASCADE,
+  created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  max_uses   INTEGER NOT NULL DEFAULT 0,       -- 0 = unlimited
+  uses       INTEGER NOT NULL DEFAULT 0,
+  expires_at INTEGER,                          -- NULL = never
+  created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_server_invites_server ON server_invites(server_id);
+
+CREATE TABLE IF NOT EXISTS server_bans (
+  server_id  INTEGER NOT NULL REFERENCES servers(id) ON DELETE CASCADE,
+  user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  reason     TEXT NOT NULL DEFAULT '',
+  banned_by  INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at INTEGER NOT NULL,
+  PRIMARY KEY (server_id, user_id)
+);
+
+-- Who did what, for moderators.
+CREATE TABLE IF NOT EXISTS audit_log (
+  id         INTEGER PRIMARY KEY,
+  server_id  INTEGER NOT NULL REFERENCES servers(id) ON DELETE CASCADE,
+  actor_id   INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  action     TEXT NOT NULL,                    -- 'member.kick', 'role.update', 'channel.create', ...
+  target_id  INTEGER,
+  meta       TEXT,                             -- JSON: what changed, reason
+  created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_audit_server ON audit_log(server_id, id);
+
+-- Text, voice and announcement channels, categories (other channels point at them) and threads.
+CREATE TABLE IF NOT EXISTS channels (
+  id          INTEGER PRIMARY KEY,
+  server_id   INTEGER NOT NULL REFERENCES servers(id) ON DELETE CASCADE,
+  type        TEXT NOT NULL CHECK (type IN ('text','voice','announcement','category','thread')),
+  parent_id   INTEGER REFERENCES channels(id) ON DELETE SET NULL, -- category for channels, channel for threads
+  name        TEXT NOT NULL,
+  topic       TEXT NOT NULL DEFAULT '',
+  position    INTEGER NOT NULL DEFAULT 0,
+  slowmode_s  INTEGER NOT NULL DEFAULT 0,
+  nsfw        INTEGER NOT NULL DEFAULT 0,
+  voice_limit INTEGER NOT NULL DEFAULT 0,
+  sync_perms  INTEGER NOT NULL DEFAULT 1,      -- 1 = use the category's overrides
+  owner_id    INTEGER REFERENCES users(id) ON DELETE SET NULL,     -- thread starter
+  starter_message_id INTEGER,
+  archived    INTEGER NOT NULL DEFAULT 0,      -- threads
+  locked      INTEGER NOT NULL DEFAULT 0,      -- threads: mods only
+  last_message_id INTEGER NOT NULL DEFAULT 0,
+  created_at  INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_channels_server ON channels(server_id, position);
+CREATE INDEX IF NOT EXISTS idx_channels_parent ON channels(parent_id);
+
+CREATE TABLE IF NOT EXISTS channel_overrides (
+  channel_id  INTEGER NOT NULL REFERENCES channels(id) ON DELETE CASCADE,
+  target_type TEXT NOT NULL CHECK (target_type IN ('role','member')),
+  target_id   INTEGER NOT NULL,
+  allow       INTEGER NOT NULL DEFAULT 0,
+  deny        INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (channel_id, target_type, target_id)
+);
+
+CREATE TABLE IF NOT EXISTS channel_messages (
+  id          INTEGER PRIMARY KEY,
+  channel_id  INTEGER NOT NULL REFERENCES channels(id) ON DELETE CASCADE,
+  author_id   INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  client_id   TEXT,
+  kind        TEXT NOT NULL DEFAULT 'default' CHECK (kind IN ('default','system','join','thread_created','pin')),
+  body        TEXT NOT NULL DEFAULT '',        -- with <@123> <@&45> <#67> tokens
+  reply_to    INTEGER,
+  created_at  INTEGER NOT NULL,
+  edited_at   INTEGER,
+  deleted     INTEGER NOT NULL DEFAULT 0,
+  pinned_at   INTEGER,
+  mentions_everyone INTEGER NOT NULL DEFAULT 0,
+  meta        TEXT,                            -- JSON: link preview, system details
+  UNIQUE(author_id, client_id)
+);
+CREATE INDEX IF NOT EXISTS idx_channel_messages ON channel_messages(channel_id, id);
+CREATE INDEX IF NOT EXISTS idx_channel_messages_pinned ON channel_messages(channel_id, pinned_at) WHERE pinned_at IS NOT NULL;
+
+-- Several files per message.
+CREATE TABLE IF NOT EXISTS channel_attachments (
+  message_id INTEGER NOT NULL REFERENCES channel_messages(id) ON DELETE CASCADE,
+  media_id   TEXT NOT NULL REFERENCES media(id),
+  position   INTEGER NOT NULL DEFAULT 0,
+  spoiler    INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (message_id, media_id)
+);
+
+-- One person can add several different reactions to a message.
+CREATE TABLE IF NOT EXISTS channel_reactions (
+  message_id INTEGER NOT NULL REFERENCES channel_messages(id) ON DELETE CASCADE,
+  user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  emoji      TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  PRIMARY KEY (message_id, user_id, emoji)
+);
+
+CREATE TABLE IF NOT EXISTS channel_mentions (
+  message_id  INTEGER NOT NULL REFERENCES channel_messages(id) ON DELETE CASCADE,
+  target_type TEXT NOT NULL CHECK (target_type IN ('user','role')),
+  target_id   INTEGER NOT NULL,
+  PRIMARY KEY (message_id, target_type, target_id)
+);
+
+-- Unread = channels.last_message_id > last_read. mention_count drives the red badge.
+CREATE TABLE IF NOT EXISTS channel_reads (
+  user_id       INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  channel_id    INTEGER NOT NULL REFERENCES channels(id) ON DELETE CASCADE,
+  last_read     INTEGER NOT NULL DEFAULT 0,
+  mention_count INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (user_id, channel_id)
+);
+`);
+// Who's in which voice channel is kept in memory, not here (it resets on restart, which is fine).
+
 // The first account on the server runs it.
 if (!db.prepare('SELECT 1 FROM users WHERE is_admin = 1').get()) {
   db.exec('UPDATE users SET is_admin = 1 WHERE id = (SELECT MIN(id) FROM users)');
