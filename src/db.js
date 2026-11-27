@@ -406,6 +406,19 @@ CREATE TABLE IF NOT EXISTS channel_reads (
 `);
 // Who's in which voice channel is kept in memory, not here (it resets on restart, which is fine).
 
+// ───────────── Profiles (Discord-style) ─────────────
+// Your main profile: banner, accent colour, pronouns and a custom status.
+if (!hasColumn('users', 'banner_media')) db.exec('ALTER TABLE users ADD COLUMN banner_media TEXT');
+if (!hasColumn('users', 'accent_colour')) db.exec('ALTER TABLE users ADD COLUMN accent_colour INTEGER');
+if (!hasColumn('users', 'pronouns')) db.exec("ALTER TABLE users ADD COLUMN pronouns TEXT NOT NULL DEFAULT ''");
+if (!hasColumn('users', 'custom_status')) db.exec("ALTER TABLE users ADD COLUMN custom_status TEXT NOT NULL DEFAULT ''");
+if (!hasColumn('users', 'status_emoji')) db.exec("ALTER TABLE users ADD COLUMN status_emoji TEXT NOT NULL DEFAULT ''");
+// Server profiles: a different avatar, banner, bio and pronouns in each server (nickname was already there).
+if (!hasColumn('server_members', 'avatar_media')) db.exec('ALTER TABLE server_members ADD COLUMN avatar_media TEXT');
+if (!hasColumn('server_members', 'banner_media')) db.exec('ALTER TABLE server_members ADD COLUMN banner_media TEXT');
+if (!hasColumn('server_members', 'bio')) db.exec("ALTER TABLE server_members ADD COLUMN bio TEXT NOT NULL DEFAULT ''");
+if (!hasColumn('server_members', 'pronouns')) db.exec("ALTER TABLE server_members ADD COLUMN pronouns TEXT NOT NULL DEFAULT ''");
+
 // The first account on the server runs it.
 if (!db.prepare('SELECT 1 FROM users WHERE is_admin = 1').get()) {
   db.exec('UPDATE users SET is_admin = 1 WHERE id = (SELECT MIN(id) FROM users)');

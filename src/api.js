@@ -45,6 +45,11 @@ export function userOut(row, viewerId = null) {
     displayName: row.display_name,
     about: row.about,
     avatar: row.avatar_media,
+    banner: row.banner_media ?? null,
+    accentColour: row.accent_colour ?? null,
+    pronouns: row.pronouns || '',
+    customStatus: row.custom_status || '',
+    statusEmoji: row.status_emoji || '',
   };
   // Online status / last seen are only shown to contacts.
   if (viewerId !== null && (viewerId === row.id || areContacts(viewerId, row.id))) {
@@ -218,11 +223,29 @@ function canSeeMedia(m, userId) {
     mediaAccessChecks.some((check) => check(m.id, userId)) ||
     m.uploader_id === userId ||
     !!q('SELECT 1 FROM stickers WHERE media_id = ? AND user_id = ?').get(m.id, userId) ||
-    !!q('SELECT 1 FROM users WHERE avatar_media = ?').get(m.id) ||
+    !!q('SELECT 1 FROM users WHERE avatar_media = ? OR banner_media = ?').get(m.id, m.id) ||
+    !!q('SELECT 1 FROM server_members WHERE avatar_media = ? OR banner_media = ?').get(m.id, m.id) ||
     !!q(`SELECT 1 FROM conversations c JOIN members mb ON mb.conversation_id = c.id WHERE c.avatar_media = ? AND mb.user_id = ?`).get(m.id, userId) ||
     !!q(`SELECT 1 FROM messages msg JOIN members mb ON mb.conversation_id = msg.conversation_id WHERE msg.media_id = ? AND mb.user_id = ?`).get(m.id, userId) ||
     !!q(`SELECT 1 FROM messages msg JOIN members mb ON mb.conversation_id = msg.conversation_id WHERE msg.meta LIKE ? AND mb.user_id = ?`).get(`%${m.id}%`, userId)
   );
+}
+
+/** An image you can use for an avatar or banner. */
+export function requireImage(id, userId) {
+  const m = requireMedia(id, userId);
+  if (!m.mime.startsWith('image/')) throw bad('That needs to be a picture');
+  return m.id;
+}
+
+/** Everyone who's in a server with this person. */
+export function sharedServerUsers(userId) {
+  return q(`SELECT DISTINCT b.user_id FROM server_members a JOIN server_members b ON b.server_id = a.server_id
+            WHERE a.user_id = ? AND b.user_id != ?`).all(userId, userId).map((r) => r.user_id);
+}
+
+export function shareAServer(a, b) {
+  return !!q('SELECT 1 FROM server_members x JOIN server_members y ON y.server_id = x.server_id WHERE x.user_id = ? AND y.user_id = ? LIMIT 1').get(a, b);
 }
 
 function requireMedia(id, userId) {
@@ -244,13 +267,14 @@ export function saveMediaBuffer(buffer, mime, filename, uploaderId) {
 }
 
 /** Removes a file once nothing refers to it any more. */
-function deleteMediaIfUnused(id) {
+export function deleteMediaIfUnused(id) {
   if (!id) return;
   const used =
     q('SELECT 1 FROM messages WHERE media_id = ? LIMIT 1').get(id) ||
     q('SELECT 1 FROM messages WHERE meta LIKE ? LIMIT 1').get(`%${id}%`) ||
     q('SELECT 1 FROM stickers WHERE media_id = ? LIMIT 1').get(id) ||
-    q('SELECT 1 FROM users WHERE avatar_media = ? LIMIT 1').get(id) ||
+    q('SELECT 1 FROM users WHERE avatar_media = ? OR banner_media = ? LIMIT 1').get(id, id) ||
+    q('SELECT 1 FROM server_members WHERE avatar_media = ? OR banner_media = ? LIMIT 1').get(id, id) ||
     q('SELECT 1 FROM conversations WHERE avatar_media = ? LIMIT 1').get(id) ||
     q('SELECT 1 FROM channel_attachments WHERE media_id = ? LIMIT 1').get(id) ||
     q('SELECT 1 FROM servers WHERE icon_media = ? OR banner_media = ? LIMIT 1').get(id, id);
@@ -571,22 +595,38 @@ route('GET', '/api/me', ({ user }) => meOut(user));
 
 route('PATCH', '/api/me', ({ user, body }) => {
   const displayName = str(body.displayName, 50, 'displayName');
-  const about = str(body.about, 140, 'about');
+  const about = str(body.about, 190, 'about');
   if (displayName !== undefined && !displayName) throw bad('Display name can’t be empty');
   let avatar = user.avatar_media;
-  if (body.avatar !== undefined) avatar = body.avatar === null ? null : requireMedia(body.avatar, user.id).id;
-  q('UPDATE users SET display_name = ?, about = ?, avatar_media = ? WHERE id = ?').run(
+  if (body.avatar !== undefined) avatar = body.avatar === null ? null : requireImage(body.avatar, user.id);
+  let banner = user.banner_media;
+  if (body.banner !== undefined) banner = body.banner === null ? null : requireImage(body.banner, user.id);
+  let accent = user.accent_colour;
+  if (body.accentColour !== undefined) accent = body.accentColour === null ? null : Number(body.accentColour) & 0xffffff;
+  const pronouns = str(body.pronouns, 40, 'pronouns');
+  const customStatus = str(body.customStatus, 128, 'customStatus');
+  const statusEmoji = str(body.statusEmoji, 16, 'statusEmoji');
+  const oldMedia = [user.avatar_media, user.banner_media];
+  q(`UPDATE users SET display_name = ?, about = ?, avatar_media = ?, banner_media = ?, accent_colour = ?,
+       pronouns = ?, custom_status = ?, status_emoji = ? WHERE id = ?`).run(
     displayName ?? user.display_name,
     about ?? user.about,
     avatar,
+    banner,
+    accent,
+    pronouns ?? user.pronouns ?? '',
+    customStatus ?? user.custom_status ?? '',
+    statusEmoji ?? user.status_emoji ?? '',
     user.id,
   );
+  for (const id of oldMedia) if (id && id !== avatar && id !== banner) deleteMediaIfUnused(id);
   const updated = getUser(user.id);
-  // Let contacts and chat partners refresh the profile.
+  // Let contacts, chat partners and everyone you share a server with refresh the profile.
   const ids = new Set([
     ...q('SELECT user_id FROM contacts WHERE contact_id = ?').all(user.id).map((r) => r.user_id),
     ...q(`SELECT DISTINCT m2.user_id FROM members m1 JOIN members m2 ON m1.conversation_id = m2.conversation_id
            WHERE m1.user_id = ? AND m2.user_id != ?`).all(user.id, user.id).map((r) => r.user_id),
+    ...sharedServerUsers(user.id),
   ]);
   for (const id of ids) sendToUser(id, { type: 'user.updated', user: userOut(updated, id) });
   return meOut(updated);
@@ -779,7 +819,8 @@ route('GET', '/api/conversations', ({ user }) => {
 route('POST', '/api/conversations', ({ user, body }) => {
   if (body.type === 'direct') {
     const other = Number(body.userId);
-    if (!areContacts(user.id, other)) throw forbidden('Add them as a contact first');
+    if (!areContacts(user.id, other) && !shareAServer(user.id, other)) throw forbidden('Add them as a contact first');
+    if (isBlocked(other, user.id) || isBlocked(user.id, other)) throw forbidden('You can’t message them');
     const { id } = tx(() => getOrCreateDirect(user.id, other));
     return conversationOut(id, user.id);
   }
@@ -1325,4 +1366,4 @@ route('GET', '/admin', ({ res }) => {
   res.end(html);
 }, { auth: false });
 
-export { getUser, conversationOut, isBlocked };
+export { getUser, conversationOut, isBlocked, areContacts };

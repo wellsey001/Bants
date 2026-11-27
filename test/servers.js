@@ -236,6 +236,44 @@ try {
     assert.match(err.error, /can’t join/);
   });
 
+  await step('profiles: main profile, server profile, and the profile card', async () => {
+    const png = Buffer.alloc(3000, 9);
+    const up = (await api('POST', '/api/media', { token: dave.token, raw: png, headers: { 'content-type': 'image/png', 'x-filename': 'b.png' } })).data;
+    const up2 = (await api('POST', '/api/media', { token: dave.token, raw: png, headers: { 'content-type': 'image/png', 'x-filename': 'a.png' } })).data;
+    // Main profile
+    const me = await api('PATCH', '/api/me', { token: dave.token, body: { banner: up.id, accentColour: 0xff4d8d, pronouns: 'he/him', customStatus: 'gaming', statusEmoji: '🎮', about: 'Here for the bants' } });
+    assert.equal(me.status, 200);
+    assert.equal(me.data.banner, up.id);
+    assert.equal(me.data.pronouns, 'he/him');
+    // Server profile
+    const sp = await api('PATCH', `/api/servers/${server.id}/me`, { token: dave.token, body: { nickname: 'Big Dave', avatar: up2.id, bio: 'Mod of the year', pronouns: 'he/they' } });
+    assert.equal(sp.status, 200);
+    const upd = await ownerWs.waitFor((e) => e.type === 'server.member.update' && e.member.user.id === dave.user.id && e.member.serverProfile.bio);
+    assert.equal(upd.member.nickname, 'Big Dave');
+    assert.equal(upd.member.serverProfile.avatar, up2.id);
+    // The owner can see Dave's server avatar and banner
+    assert.equal((await api('GET', `/api/media/${up2.id}`, { token: owner.token })).status, 200);
+    assert.equal((await api('GET', `/api/media/${up.id}`, { token: owner.token })).status, 200);
+    // Profile card
+    const card = (await api('GET', `/api/servers/${server.id}/members/${dave.user.id}/profile`, { token: owner.token })).data;
+    assert.equal(card.user.customStatus, 'gaming');
+    assert.equal(card.serverProfile.bio, 'Mod of the year');
+    assert.equal(card.contact, 'none');
+    assert.equal(card.canMessage, true);
+    assert.ok(card.memberSince > 0);
+    // Messages show the server avatar
+    const m = (await api('POST', `/api/channels/${general.id}/messages`, { token: dave.token, body: { body: 'new pfp who dis' } })).data;
+    assert.equal(m.author.avatar, up2.id);
+    assert.equal(m.author.nickname, 'Big Dave');
+    // You can message people you share a server with, like Discord
+    const dm = await api('POST', '/api/conversations', { token: owner.token, body: { type: 'direct', userId: dave.user.id } });
+    assert.equal(dm.status, 200);
+    // Clearing the server avatar falls back to the main one
+    await api('PATCH', `/api/servers/${server.id}/me`, { token: dave.token, body: { avatar: null } });
+    const m2 = (await api('POST', `/api/channels/${general.id}/messages`, { token: dave.token, body: { body: 'back to normal' } })).data;
+    assert.equal(m2.author.avatar, me.data.avatar ?? null);
+  });
+
   await step('edit, react, pin and delete', async () => {
     const m = (await api('POST', `/api/channels/${general.id}/messages`, { token: dave.token, body: { body: 'typo' } })).data;
     assert.equal((await api('PATCH', `/api/channel-messages/${m.id}`, { token: owner.token, body: { body: 'hijack' } })).status, 403);

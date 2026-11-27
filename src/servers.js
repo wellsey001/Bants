@@ -2,7 +2,7 @@
 // Chats (conversations) are untouched. The app switches between the two with one button.
 import crypto from 'node:crypto';
 import { q, tx } from './db.js';
-import { route, HttpError, getUser, mediaAccessChecks } from './api.js';
+import { route, HttpError, getUser, mediaAccessChecks, requireImage, deleteMediaIfUnused, areContacts, isBlocked, sharedServerUsers } from './api.js';
 import { sendToUser, isOnline } from './hub.js';
 import { voiceMembers, leaveVoiceIn, recheckVoice } from './calls.js';
 import {
@@ -126,10 +126,24 @@ function channelOut(c, viewerId, perms = channelPermissions(c.id, viewerId)) {
   return out;
 }
 
+/** The bits of someone's main profile that show up in servers. */
+function profileUser(row) {
+  return {
+    id: row.id, username: row.username, displayName: row.display_name, avatar: row.avatar_media, about: row.about,
+    banner: row.banner_media ?? null, accentColour: row.accent_colour ?? null, pronouns: row.pronouns || '',
+    customStatus: row.custom_status || '', statusEmoji: row.status_emoji || '',
+  };
+}
+
+const MEMBER_SELECT = `SELECT u.*, m.nickname, m.joined_at, m.timeout_until, m.avatar_media AS server_avatar, m.banner_media AS server_banner,
+  m.bio AS server_bio, m.pronouns AS server_pronouns FROM server_members m JOIN users u ON u.id = m.user_id`;
+
 function memberOut(serverId, row) {
   const roleIds = q('SELECT role_id FROM member_roles WHERE server_id = ? AND user_id = ?').all(serverId, row.id).map((r) => r.role_id);
   return {
-    user: { id: row.id, username: row.username, displayName: row.display_name, avatar: row.avatar_media, about: row.about },
+    user: profileUser(row),
+    // Server profile: overrides the main profile inside this server, where set.
+    serverProfile: { avatar: row.server_avatar ?? null, banner: row.server_banner ?? null, bio: row.server_bio || '', pronouns: row.server_pronouns || '' },
     nickname: row.nickname,
     roleIds,
     joinedAt: row.joined_at,
@@ -167,7 +181,8 @@ export function serverOut(serverId, viewerId) {
 function messageOut(m) {
   const author = m.author_id ? getUser(m.author_id) : null;
   const ch = getChannel(m.channel_id);
-  const nickname = author && ch ? q('SELECT nickname FROM server_members WHERE server_id = ? AND user_id = ?').get(ch.server_id, author.id)?.nickname : null;
+  const sm = author && ch ? q('SELECT nickname, avatar_media FROM server_members WHERE server_id = ? AND user_id = ?').get(ch.server_id, author.id) : null;
+  const nickname = sm?.nickname;
   const reactions = new Map();
   if (!m.deleted) {
     for (const r of q('SELECT emoji, user_id FROM channel_reactions WHERE message_id = ? ORDER BY created_at').all(m.id)) {
@@ -182,7 +197,8 @@ function messageOut(m) {
   if (m.meta && !m.deleted) try { meta = JSON.parse(m.meta); } catch {}
   return {
     id: m.id, channelId: m.channel_id, serverId: ch?.server_id ?? null, clientId: m.client_id, kind: m.kind,
-    author: author ? { id: author.id, username: author.username, displayName: author.display_name, avatar: author.avatar_media, nickname: nickname ?? null } : null,
+    // Server avatar wins over the main one, like Discord.
+    author: author ? { id: author.id, username: author.username, displayName: author.display_name, avatar: sm?.avatar_media || author.avatar_media, nickname: nickname ?? null } : null,
     body: m.deleted ? '' : m.body,
     replyTo: m.reply_to, createdAt: m.created_at, editedAt: m.edited_at, deleted: !!m.deleted,
     pinned: !!m.pinned_at, mentionsEveryone: !!m.mentions_everyone,
@@ -431,12 +447,57 @@ route('POST', '/api/servers/:id/leave', ({ user, params }) => {
   return { ok: true };
 });
 
-/** Your own settings for a server: sidebar order and mute. */
+/** Your own settings for a server: sidebar order, mute, and your server profile. */
 route('PATCH', '/api/servers/:id/me', ({ user, params, body }) => {
   const s = requireServer(Number(params.id), user.id);
   if (body.muted !== undefined) q('UPDATE server_members SET muted = ? WHERE server_id = ? AND user_id = ?').run(body.muted ? 1 : 0, s.id, user.id);
   if (body.position !== undefined) q('UPDATE server_members SET position = ? WHERE server_id = ? AND user_id = ?').run(int(body.position, 'position'), s.id, user.id);
+
+  // Server profile. Anything left empty falls back to your main profile.
+  const me = q('SELECT * FROM server_members WHERE server_id = ? AND user_id = ?').get(s.id, user.id);
+  const changes = {};
+  if (body.nickname !== undefined) {
+    const perms = serverPermissions(s.id, user.id);
+    if (!has(perms, P.CHANGE_NICKNAME) && !has(perms, P.MANAGE_NICKNAMES)) throw forbidden('You can’t change your nickname here');
+    changes.nickname = body.nickname === null ? null : str(body.nickname, 32, 'nickname') || null;
+  }
+  if (body.avatar !== undefined) changes.avatar_media = body.avatar === null ? null : requireImage(body.avatar, user.id);
+  if (body.banner !== undefined) changes.banner_media = body.banner === null ? null : requireImage(body.banner, user.id);
+  if (body.bio !== undefined) changes.bio = str(body.bio, 190, 'bio') || '';
+  if (body.pronouns !== undefined) changes.pronouns = str(body.pronouns, 40, 'pronouns') || '';
+  const keys = Object.keys(changes);
+  if (keys.length) {
+    q(`UPDATE server_members SET ${keys.map((k) => `${k} = ?`).join(', ')} WHERE server_id = ? AND user_id = ?`).run(...Object.values(changes), s.id, user.id);
+    for (const old of [me.avatar_media, me.banner_media]) if (old && old !== changes.avatar_media && old !== changes.banner_media) deleteMediaIfUnused(old);
+    const row = q(`${MEMBER_SELECT} WHERE m.server_id = ? AND m.user_id = ?`).get(s.id, user.id);
+    sendToServer(s.id, { type: 'server.member.update', serverId: s.id, member: memberOut(s.id, row) });
+  }
   return serverOut(s.id, user.id);
+});
+
+/**
+ * Everything for someone's profile card in a server: main profile, server profile, roles,
+ * when they joined, which other servers you're both in, and whether you can message them.
+ */
+route('GET', '/api/servers/:id/members/:userId/profile', ({ user, params }) => {
+  const s = requireServer(Number(params.id), user.id);
+  const targetId = Number(params.userId);
+  const row = q(`${MEMBER_SELECT} WHERE m.server_id = ? AND m.user_id = ?`).get(s.id, targetId);
+  if (!row) throw notFound('Member not found');
+  const member = memberOut(s.id, row);
+  const mutualServers = q(`SELECT s.id, s.name, s.icon_media FROM server_members a JOIN server_members b ON b.server_id = a.server_id
+                            JOIN servers s ON s.id = a.server_id WHERE a.user_id = ? AND b.user_id = ? AND s.id != ? ORDER BY s.name COLLATE NOCASE`)
+    .all(user.id, targetId, s.id).map((x) => ({ id: x.id, name: x.name, icon: x.icon_media }));
+  const self = targetId === user.id;
+  const blocked = isBlocked(user.id, targetId) || isBlocked(targetId, user.id);
+  const request = q('SELECT from_user FROM contact_requests WHERE (from_user = ? AND to_user = ?) OR (from_user = ? AND to_user = ?)').get(user.id, targetId, targetId, user.id);
+  return {
+    ...member,
+    memberSince: row.created_at, // on Bants
+    mutualServers,
+    contact: self ? 'self' : areContacts(user.id, targetId) ? 'contact' : request ? (request.from_user === user.id ? 'requested' : 'incoming') : 'none',
+    canMessage: !self && !blocked,
+  };
 });
 
 route('GET', '/api/servers/:id/audit-log', ({ user, params, query }) => {
@@ -451,7 +512,7 @@ route('GET', '/api/servers/:id/audit-log', ({ user, params, query }) => {
 
 route('GET', '/api/servers/:id/members', ({ user, params }) => {
   const s = requireServer(Number(params.id), user.id);
-  return q('SELECT u.*, m.nickname, m.joined_at, m.timeout_until FROM server_members m JOIN users u ON u.id = m.user_id WHERE m.server_id = ? ORDER BY m.joined_at')
+  return q(`${MEMBER_SELECT} WHERE m.server_id = ? ORDER BY m.joined_at`)
     .all(s.id).map((row) => memberOut(s.id, row));
 });
 
@@ -494,7 +555,7 @@ route('PATCH', '/api/servers/:id/members/:userId', ({ user, params, body }) => {
     }
   });
 
-  const row = q('SELECT u.*, m.nickname, m.joined_at, m.timeout_until FROM server_members m JOIN users u ON u.id = m.user_id WHERE m.server_id = ? AND m.user_id = ?').get(s.id, targetId);
+  const row = q(`${MEMBER_SELECT} WHERE m.server_id = ? AND m.user_id = ?`).get(s.id, targetId);
   const out = memberOut(s.id, row);
   sendToServer(s.id, { type: 'server.member.update', serverId: s.id, member: out });
   // Role changes can change which channels they see.
@@ -593,7 +654,7 @@ route('POST', '/api/invites/:code', ({ user, params }) => {
   });
   const id = Math.abs(serverId);
   if (serverId < 0) {
-    const row = q('SELECT u.*, m.nickname, m.joined_at, m.timeout_until FROM server_members m JOIN users u ON u.id = m.user_id WHERE m.server_id = ? AND m.user_id = ?').get(id, user.id);
+    const row = q(`${MEMBER_SELECT} WHERE m.server_id = ? AND m.user_id = ?`).get(id, user.id);
     sendToServer(id, { type: 'server.member.add', serverId: id, member: memberOut(id, row) }, { exceptUserId: user.id });
     sendToUser(user.id, { type: 'server.add', server: serverOut(id, user.id) });
     const sys = getServer(id).system_channel_id;
