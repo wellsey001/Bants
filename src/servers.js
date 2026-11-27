@@ -108,6 +108,8 @@ function roleOut(r) {
   return {
     id: r.id, name: r.name, colour: r.colour, position: r.position, permissions: r.permissions,
     hoist: !!r.hoist, mentionable: !!r.mentionable, isDefault: !!r.is_default,
+    // A little picture next to names: an emoji or an uploaded image.
+    iconEmoji: r.icon_emoji || null, iconMedia: r.icon_media || null,
   };
 }
 
@@ -193,6 +195,7 @@ export function serverOut(serverId, viewerId) {
     mentionCount: visible.reduce((n, c) => n + c.mentionCount, 0),
     emojis: q('SELECT * FROM server_emojis WHERE server_id = ? ORDER BY name COLLATE NOCASE').all(serverId).map(emojiOut),
     rules: s.rules || '', welcome: s.welcome || '', requireRules: !!s.require_rules,
+    vanity: s.vanity || null, inviteBackground: s.invite_bg || null,
     rulesAccepted: !s.require_rules || s.owner_id === viewerId || !!me?.rules_accepted_at,
   };
 }
@@ -423,6 +426,9 @@ export function notifyServerPresence(userId, online) {
 
 /** Can this person see this file because of a server? (server icon, or attachment in a channel they can see) */
 export function canSeeServerMedia(mediaId, userId) {
+  // Server pictures and invite backgrounds show on invite previews; role icons show anywhere names do.
+  if (q('SELECT 1 FROM servers WHERE icon_media = ? OR banner_media = ? OR invite_bg = ?').get(mediaId, mediaId, mediaId)) return true;
+  if (q('SELECT 1 FROM roles r JOIN server_members m ON m.server_id = r.server_id WHERE r.icon_media = ? AND m.user_id = ?').get(mediaId, userId)) return true;
   if (q('SELECT 1 FROM servers s JOIN server_members m ON m.server_id = s.id WHERE (s.icon_media = ? OR s.banner_media = ?) AND m.user_id = ?').get(mediaId, mediaId, userId)) return true;
   const rows = q('SELECT DISTINCT cm.channel_id FROM channel_attachments a JOIN channel_messages cm ON cm.id = a.message_id WHERE a.media_id = ? AND cm.deleted = 0').all(mediaId);
   return rows.some((r) => has(channelPermissions(r.channel_id, userId), P.VIEW_CHANNEL | P.READ_HISTORY));
@@ -473,7 +479,13 @@ route('PATCH', '/api/servers/:id', ({ user, params, body }) => {
   const changes = {};
   if (name !== undefined) changes.name = name;
   if (description !== undefined) changes.description = description;
-  for (const [key, col] of [['icon', 'icon_media'], ['banner', 'banner_media']]) {
+  if (body.vanity !== undefined) {
+    const v = body.vanity ? String(body.vanity).trim().toLowerCase() : null;
+    if (v && !/^[a-z0-9-]{3,32}$/.test(v)) throw bad('Vanity links are 3–32 letters, numbers or dashes');
+    if (v && (q('SELECT 1 FROM servers WHERE vanity = ? COLLATE NOCASE AND id != ?').get(v, s.id) || q('SELECT 1 FROM server_invites WHERE code = ?').get(v))) throw bad('That link is taken');
+    changes.vanity = v;
+  }
+  for (const [key, col] of [['icon', 'icon_media'], ['banner', 'banner_media'], ['inviteBackground', 'invite_bg']]) {
     if (body[key] === undefined) continue;
     if (body[key] !== null) {
       const m = q('SELECT uploader_id, mime FROM media WHERE id = ?').get(String(body[key]));
@@ -711,24 +723,36 @@ route('GET', '/api/servers/:id/invites', ({ user, params }) => {
 });
 
 /** Preview an invite before joining. */
+/** An invite code, or a server's vanity link (which never runs out). */
+function findInvite(code) {
+  const inv = q('SELECT * FROM server_invites WHERE code = ?').get(code);
+  if (inv) return inv;
+  const s = q('SELECT id FROM servers WHERE vanity = ? COLLATE NOCASE').get(String(code).toLowerCase());
+  return s ? { code: String(code).toLowerCase(), server_id: s.id, vanity: true, uses: 0, max_uses: 0, expires_at: null } : null;
+}
+
 route('GET', '/api/invites/:code', ({ params }) => {
-  const inv = q('SELECT * FROM server_invites WHERE code = ?').get(params.code);
+  const inv = findInvite(params.code);
   if (!inv || (inv.expires_at && inv.expires_at < Date.now()) || (inv.max_uses && inv.uses >= inv.max_uses)) throw notFound('This invite is invalid or has expired');
   const s = getServer(inv.server_id);
   const ids = memberIds(s.id);
-  return { code: inv.code, server: { id: s.id, name: s.name, icon: s.icon_media, description: s.description }, memberCount: ids.length, onlineCount: ids.filter(isOnline).length };
+  return {
+    code: inv.code,
+    server: { id: s.id, name: s.name, icon: s.icon_media, banner: s.banner_media, description: s.description, inviteBackground: s.invite_bg || null },
+    memberCount: ids.length, onlineCount: ids.filter(isOnline).length,
+  };
 });
 
 route('POST', '/api/invites/:code', ({ user, params }) => {
   const now = Date.now();
   const serverId = tx(() => {
-    const inv = q('SELECT * FROM server_invites WHERE code = ?').get(params.code);
+    const inv = findInvite(params.code);
     if (!inv || (inv.expires_at && inv.expires_at < now) || (inv.max_uses && inv.uses >= inv.max_uses)) throw notFound('This invite is invalid or has expired');
     if (q('SELECT 1 FROM server_bans WHERE server_id = ? AND user_id = ?').get(inv.server_id, user.id)) throw forbidden('You’re banned from this server');
     if (isMember(inv.server_id, user.id)) return inv.server_id;
     const pos = q('SELECT COALESCE(MAX(position), -1) + 1 AS p FROM server_members WHERE user_id = ?').get(user.id).p;
     q('INSERT INTO server_members (server_id, user_id, joined_at, position) VALUES (?, ?, ?, ?)').run(inv.server_id, user.id, now, pos);
-    q('UPDATE server_invites SET uses = uses + 1 WHERE code = ?').run(inv.code);
+    if (!inv.vanity) q('UPDATE server_invites SET uses = uses + 1 WHERE code = ?').run(inv.code);
     return -inv.server_id; // negative = newly joined
   });
   const id = Math.abs(serverId);
@@ -783,6 +807,15 @@ route('PATCH', '/api/roles/:id', ({ user, params, body }) => {
   if (body.colour !== undefined) changes.colour = body.colour === null ? null : int(body.colour, 'colour') & 0xffffff;
   if (body.hoist !== undefined) changes.hoist = body.hoist ? 1 : 0;
   if (body.mentionable !== undefined) changes.mentionable = body.mentionable ? 1 : 0;
+  if (body.iconEmoji !== undefined) { changes.icon_emoji = body.iconEmoji ? String(body.iconEmoji).slice(0, 16) : null; if (changes.icon_emoji) changes.icon_media = null; }
+  if (body.iconMedia !== undefined) {
+    if (body.iconMedia) {
+      const m = q('SELECT uploader_id, mime FROM media WHERE id = ?').get(String(body.iconMedia));
+      if (!m || m.uploader_id !== user.id || !m.mime.startsWith('image/')) throw bad('Unknown icon image');
+      changes.icon_media = String(body.iconMedia);
+      changes.icon_emoji = null;
+    } else changes.icon_media = null;
+  }
   if (body.permissions !== undefined) {
     const perms = int(body.permissions, 'permissions') & ALL;
     checkGrantable(role.server_id, user.id, perms & ~role.permissions); // only newly added bits need checking

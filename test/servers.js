@@ -542,6 +542,26 @@ try {
     await ownerWs.waitFor((e) => e.type === 'voice.state' && e.channelId === stage.id && e.members.length === 0);
   });
 
+  await step('vanity invites, invite backgrounds and role icons', async () => {
+    const sid = server.id;
+    const png = Buffer.alloc(800, 2);
+    const bg = (await api('POST', '/api/media', { token: owner.token, raw: png, headers: { 'content-type': 'image/png' } })).data;
+    const s = (await api('PATCH', `/api/servers/${sid}`, { token: owner.token, body: { vanity: 'TheLads', inviteBackground: bg.id } })).data;
+    assert.equal(s.vanity, 'thelads');
+    const preview = (await api('GET', '/api/invites/thelads', { token: dave.token })).data;
+    assert.equal(preview.server.inviteBackground, bg.id);
+    assert.equal((await api('GET', `/api/media/${bg.id}`, { token: dave.token })).status, 200);
+    const other = await reg('vanityguy');
+    assert.equal((await api('POST', '/api/invites/THELADS', { token: other.token })).status, 200);
+    assert.equal((await api('PATCH', `/api/servers/${sid}`, { token: owner.token, body: { vanity: 'x' } })).status, 400);
+    // Role icon
+    const role = (await api('GET', `/api/servers/${sid}`, { token: owner.token })).data.roles.find((r) => !r.isDefault);
+    const r = await api('PATCH', `/api/roles/${role.id}`, { token: owner.token, body: { iconEmoji: '🛡️' } });
+    assert.equal(r.status, 200);
+    const fresh = (await api('GET', `/api/servers/${sid}`, { token: dave.token })).data;
+    assert.equal(fresh.roles.find((x) => x.id === role.id).iconEmoji, '🛡️');
+  });
+
   await step('leaving, and the owner can’t leave without handing over', async () => {
     assert.equal((await api('POST', `/api/servers/${server.id}/leave`, { token: owner.token })).status, 400);
     assert.equal((await api('POST', `/api/servers/${server.id}/leave`, { token: dave.token })).status, 200);

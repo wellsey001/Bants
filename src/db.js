@@ -515,6 +515,12 @@ CREATE TABLE IF NOT EXISTS sound_favourites (
 for (const col of ['join_sound', 'leave_sound']) if (!hasColumn('users', col)) db.exec(`ALTER TABLE users ADD COLUMN ${col} TEXT`);
 if (!hasColumn('channels', 'bitrate')) db.exec('ALTER TABLE channels ADD COLUMN bitrate INTEGER NOT NULL DEFAULT 64');
 if (!hasColumn('channels', 'is_stage')) db.exec('ALTER TABLE channels ADD COLUMN is_stage INTEGER NOT NULL DEFAULT 0');
+// ── Server perks: vanity invite links, invite backgrounds, role icons ──
+if (!hasColumn('servers', 'vanity')) db.exec('ALTER TABLE servers ADD COLUMN vanity TEXT');
+if (!hasColumn('servers', 'invite_bg')) db.exec('ALTER TABLE servers ADD COLUMN invite_bg TEXT');
+db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_servers_vanity ON servers(vanity COLLATE NOCASE) WHERE vanity IS NOT NULL');
+if (!hasColumn('roles', 'icon_emoji')) db.exec('ALTER TABLE roles ADD COLUMN icon_emoji TEXT');
+if (!hasColumn('roles', 'icon_media')) db.exec('ALTER TABLE roles ADD COLUMN icon_media TEXT');
 // Server emoji ids start high so they never clash with personal ones in <:name:id>.
 if (!db.prepare('SELECT 1 FROM sqlite_sequence WHERE name = ?').get('server_emojis')) db.prepare("INSERT INTO sqlite_sequence (name, seq) VALUES ('server_emojis', 1000000000)").run();
 

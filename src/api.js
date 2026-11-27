@@ -311,7 +311,8 @@ export function deleteMediaIfUnused(id) {
     q('SELECT 1 FROM users WHERE join_sound = ? OR leave_sound = ? LIMIT 1').get(id, id) ||
     q('SELECT 1 FROM webhooks WHERE avatar_media = ? LIMIT 1').get(id) ||
     q('SELECT 1 FROM channel_messages WHERE meta LIKE ? LIMIT 1').get(`%${id}%`) ||
-    q('SELECT 1 FROM servers WHERE icon_media = ? OR banner_media = ? LIMIT 1').get(id, id);
+    q('SELECT 1 FROM servers WHERE icon_media = ? OR banner_media = ? OR invite_bg = ? LIMIT 1').get(id, id, id) ||
+    q('SELECT 1 FROM roles WHERE icon_media = ? LIMIT 1').get(id);
   if (used) return;
   q('DELETE FROM media WHERE id = ?').run(id);
   fs.rmSync(path.join(MEDIA_DIR(), id), { force: true });
