@@ -14,10 +14,10 @@ const TOKEN = /<(a?):([A-Za-z0-9_]{2,32}):(\d{1,12})>/g;
 const IMAGE_TYPES = new Set(['image/png', 'image/jpeg', 'image/webp', 'image/gif']);
 const bad = (msg) => new HttpError(400, msg);
 
-export const emojiOut = (e) => ({ id: e.id, name: e.name, media: e.media_id, animated: !!e.animated, userId: e.user_id });
+export const emojiOut = (e) => ({ id: e.id, name: e.name, media: e.media_id, animated: !!e.animated, userId: e.user_id ?? null, serverId: e.server_id ?? null });
 
 /** Whether the file moves: GIFs, animated WebP and animated PNG. */
-function isAnimated(file, mime) {
+export function isAnimated(file, mime) {
   if (mime === 'image/gif') return true;
   let head;
   try {
@@ -44,13 +44,18 @@ export function emojiIdsIn(...texts) {
 /** Looks up emojis by id, for drawing them. Deleted ones are simply missing. */
 export function emojisById(ids) {
   if (!ids.length) return [];
-  return q(`SELECT * FROM user_emojis WHERE id IN (${ids.map(() => '?').join(',')})`).all(...ids).map(emojiOut);
+  const marks = ids.map(() => '?').join(',');
+  return [
+    ...q(`SELECT * FROM user_emojis WHERE id IN (${marks})`).all(...ids),
+    ...q(`SELECT * FROM server_emojis WHERE id IN (${marks})`).all(...ids),
+  ].map(emojiOut);
 }
 
-/** Only your own emojis go through. Anyone else's turn into plain :name:. */
-export function cleanEmojiTokens(text, userId) {
+/** Only your own emojis (and this server's) go through. Anyone else's turn into plain :name:. */
+export function cleanEmojiTokens(text, userId, serverId = null) {
   if (!text || !text.includes('<')) return text;
   const mine = new Set(q('SELECT id FROM user_emojis WHERE user_id = ?').all(userId).map((r) => r.id));
+  if (serverId) for (const r of q('SELECT id FROM server_emojis WHERE server_id = ?').all(serverId)) mine.add(r.id);
   return text.replace(TOKEN, (all, a, name, id) => (mine.has(Number(id)) ? all : `:${name}:`));
 }
 
@@ -58,7 +63,14 @@ export function cleanEmojiTokens(text, userId) {
 export function customReaction(emoji) {
   const m = /^<(a?):([A-Za-z0-9_]{2,32}):(\d{1,12})>$/.exec(emoji);
   if (!m) return null;
-  return q('SELECT * FROM user_emojis WHERE id = ?').get(Number(m[3])) || { missing: true };
+  return q('SELECT * FROM user_emojis WHERE id = ?').get(Number(m[3])) || q('SELECT * FROM server_emojis WHERE id = ?').get(Number(m[3])) || { missing: true };
+}
+
+/** Can this person start a reaction / use this emoji here? Their own, or one belonging to this server. */
+export function canUseEmoji(e, userId, serverId) {
+  if (!e || e.missing) return false;
+  if (e.server_id != null) return e.server_id === serverId;
+  return e.user_id === userId;
 }
 
 function tellMine(userId) {

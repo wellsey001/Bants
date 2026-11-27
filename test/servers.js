@@ -387,6 +387,64 @@ try {
     assert.equal((await api('POST', `/api/channels/${general.id}/gif`, { token: dave.token, body: { url: 'https://media.giphy.com/x.gif' } })).status, 503);
   });
 
+  await step('forums, polls, events, rules, server emojis and webhooks', async () => {
+    const sid = server.id;
+    // Forum: posts are threads with a first message
+    const forum = (await api('POST', `/api/servers/${sid}/channels`, { token: owner.token, body: { name: 'Help Desk', type: 'forum' } })).data;
+    assert.equal(forum.type, 'forum');
+    assert.equal((await api('POST', `/api/channels/${forum.id}/messages`, { token: owner.token, body: { body: 'nope' } })).status, 400);
+    const post = await api('POST', `/api/channels/${forum.id}/threads`, { token: dave.token, body: { name: 'My PC won’t boot', body: 'Tried turning it off and on' } });
+    assert.equal(post.status, 200);
+    assert.equal(post.data.firstMessage.body, 'Tried turning it off and on');
+    const posts = (await api('GET', `/api/channels/${forum.id}/threads`, { token: owner.token })).data;
+    assert.equal(posts.length, 1);
+    assert.equal(posts[0].messageCount, 1);
+
+    // Poll
+    const poll = (await api('POST', `/api/channels/${general.id}/polls`, { token: owner.token, body: { question: 'FIFA or COD?', options: ['FIFA', 'COD'] } })).data;
+    assert.equal(poll.kind, 'poll');
+    const voted = (await api('POST', `/api/channel-messages/${poll.id}/vote`, { token: dave.token, body: { options: [1] } })).data;
+    assert.deepEqual(voted.poll.votes[1], [dave.user.id]);
+    const changed = (await api('POST', `/api/channel-messages/${poll.id}/vote`, { token: dave.token, body: { options: [0, 1] } })).data;
+    assert.deepEqual(changed.poll.votes.map((v) => v.length), [1, 0], 'single choice keeps one');
+
+    // Event with RSVP
+    assert.equal((await api('POST', `/api/servers/${sid}/events`, { token: dave.token, body: { title: 'x', startsAt: Date.now() + 3600e3 } })).status, 403);
+    const ev = (await api('POST', `/api/servers/${sid}/events`, { token: owner.token, body: { title: 'Game night', startsAt: Date.now() + 10 * 60e3, description: 'Bring snacks' } })).data;
+    assert.deepEqual(ev.going, [owner.user.id]);
+    const r = (await api('PUT', `/api/events/${ev.id}/rsvp`, { token: dave.token, body: { status: 'interested' } })).data;
+    assert.equal(r.myRsvp, 'interested');
+    assert.equal((await api('GET', `/api/servers/${sid}/events`, { token: dave.token })).data.length, 1);
+
+    // Server emojis: anyone in the server can use them, nobody else's stay :name:
+    const png = Buffer.alloc(700, 3);
+    const up = (await api('POST', '/api/media', { token: owner.token, raw: png, headers: { 'content-type': 'image/png' } })).data;
+    const se = (await api('POST', `/api/servers/${sid}/emojis`, { token: owner.token, body: { name: 'lads', media: up.id } })).data;
+    assert.ok(se.id > 1e9);
+    const usedByDave = (await api('POST', `/api/channels/${general.id}/messages`, { token: dave.token, body: { body: `<:lads:${se.id}>` } })).data;
+    assert.equal(usedByDave.body, `<:lads:${se.id}>`);
+    assert.equal(usedByDave.emojis[0].serverId, sid);
+    assert.equal((await api('PUT', `/api/channel-messages/${usedByDave.id}/reactions/${encodeURIComponent(`<:lads:${se.id}>`)}`, { token: dave.token })).status, 200);
+    assert.equal((await api('GET', `/api/servers/${sid}`, { token: dave.token })).data.emojis.length, 1);
+
+    // Rules: must accept before posting
+    assert.equal((await api('PUT', `/api/servers/${sid}/rules`, { token: owner.token, body: { rules: 'Be nice', welcome: 'Hiya', requireRules: true } })).status, 200);
+    assert.equal((await api('GET', `/api/servers/${sid}`, { token: dave.token })).data.rulesAccepted, false);
+    assert.equal((await api('POST', `/api/channels/${general.id}/messages`, { token: dave.token, body: { body: 'hi' } })).status, 403);
+    await api('POST', `/api/servers/${sid}/accept-rules`, { token: dave.token });
+    assert.equal((await api('POST', `/api/channels/${general.id}/messages`, { token: dave.token, body: { body: 'hi' } })).status, 200);
+    await api('PUT', `/api/servers/${sid}/rules`, { token: owner.token, body: { requireRules: false } });
+
+    // Webhook: Discord-style JSON, no login needed
+    const hook = (await api('POST', `/api/channels/${general.id}/webhooks`, { token: owner.token, body: { name: 'Unraid' } })).data;
+    const path = new URL(hook.url).pathname;
+    const posted = await api('POST', path + '?wait=true', { body: { content: 'Array started', embeds: [{ title: 'Disk 1', description: 'Healthy' }] } });
+    assert.equal(posted.status, 200);
+    assert.equal(posted.data.author.displayName, 'Unraid');
+    assert.ok(posted.data.body.includes('Disk 1'));
+    assert.equal((await api('POST', path.replace(/[^/]+$/, 'wrong'), { body: { content: 'x' } })).status, 404);
+  });
+
   await step('leaving, and the owner can’t leave without handing over', async () => {
     assert.equal((await api('POST', `/api/servers/${server.id}/leave`, { token: owner.token })).status, 400);
     assert.equal((await api('POST', `/api/servers/${server.id}/leave`, { token: dave.token })).status, 200);

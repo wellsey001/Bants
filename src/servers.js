@@ -5,7 +5,7 @@ import { q, tx } from './db.js';
 import { route, HttpError, getUser, mediaAccessChecks, requireImage, deleteMediaIfUnused, saveMediaBuffer, areContacts, isBlocked, sharedServerUsers } from './api.js';
 import { sendToUser, isOnline } from './hub.js';
 import { voiceMembers, leaveVoiceIn, recheckVoice } from './calls.js';
-import { emojiIdsIn, emojisById, cleanEmojiTokens, customReaction } from './emojis.js';
+import { emojiIdsIn, emojisById, cleanEmojiTokens, customReaction, canUseEmoji, emojiOut } from './emojis.js';
 import { gifsEnabled, downloadGif } from './gifs.js';
 import {
   P, ALL, DEFAULT_EVERYONE, has, serverPermissions, channelPermissions, topRolePosition, outranks, canManageRole,
@@ -17,7 +17,7 @@ const forbidden = (msg = 'You don’t have permission to do that') => new HttpEr
 
 const MAX_SERVERS_OWNED = Number(process.env.MAX_SERVERS_PER_USER || 25);
 const MAX_BODY = 4000;
-const CHANNEL_TYPES = ['text', 'voice', 'announcement', 'category'];
+const CHANNEL_TYPES = ['text', 'voice', 'announcement', 'category', 'forum'];
 const INVITE_ALPHABET = 'abcdefghjkmnpqrstuvwxyzABCDEFGHJKMNPQRSTUVWXYZ23456789';
 
 function str(v, max, field) {
@@ -35,7 +35,7 @@ const int = (v, field) => {
 };
 /** Text channel names look like #general: lower case, dashes for spaces. */
 const channelName = (name, type) =>
-  type === 'text' || type === 'announcement' || type === 'thread'
+  type === 'text' || type === 'announcement' || type === 'thread' || type === 'forum'
     ? name.toLowerCase().replace(/\s+/g, '-').replace(/[^\p{L}\p{N}_-]/gu, '').slice(0, 100)
     : name.slice(0, 100);
 
@@ -112,7 +112,7 @@ function roleOut(r) {
 function channelOut(c, viewerId, perms = channelPermissions(c.id, viewerId)) {
   const read = q('SELECT last_read, mention_count FROM channel_reads WHERE user_id = ? AND channel_id = ?').get(viewerId, c.id);
   const out = {
-    id: c.id, serverId: c.server_id, type: c.type, parentId: c.parent_id, name: c.name, topic: c.topic,
+    id: c.id, serverId: c.server_id, type: c.is_forum ? 'forum' : c.type, parentId: c.parent_id, name: c.name, topic: c.topic,
     position: c.position, slowmode: c.slowmode_s, nsfw: !!c.nsfw, syncPerms: !!c.sync_perms,
     lastMessageId: c.last_message_id,
     // Voice channels have their own text chat too, so they get unread dots like text channels.
@@ -124,7 +124,14 @@ function channelOut(c, viewerId, perms = channelPermissions(c.id, viewerId)) {
     out.userLimit = c.voice_limit;
     out.voiceMembers = voiceMembers(c.id);
   }
-  if (c.type === 'thread') Object.assign(out, { ownerId: c.owner_id, archived: !!c.archived, locked: !!c.locked, starterMessageId: c.starter_message_id });
+  if (c.type === 'thread') {
+    Object.assign(out, { ownerId: c.owner_id, archived: !!c.archived, locked: !!c.locked, starterMessageId: c.starter_message_id });
+    // Forum posts show their first message and how many replies they've had.
+    const first = q('SELECT * FROM channel_messages WHERE channel_id = ? AND deleted = 0 ORDER BY id LIMIT 1').get(c.id);
+    out.messageCount = q('SELECT COUNT(*) AS n FROM channel_messages WHERE channel_id = ? AND deleted = 0').get(c.id).n;
+    out.createdAt = c.created_at;
+    if (first) out.firstMessage = messageOut(first);
+  }
   return out;
 }
 
@@ -177,6 +184,9 @@ export function serverOut(serverId, viewerId) {
     me: me ? { nickname: me.nickname, muted: !!me.muted, position: me.position, timeoutUntil: me.timeout_until, roleIds: q('SELECT role_id FROM member_roles WHERE server_id = ? AND user_id = ?').all(serverId, viewerId).map((r) => r.role_id) } : null,
     unread: visible.some((c) => c.unread),
     mentionCount: visible.reduce((n, c) => n + c.mentionCount, 0),
+    emojis: q('SELECT * FROM server_emojis WHERE server_id = ? ORDER BY name COLLATE NOCASE').all(serverId).map(emojiOut),
+    rules: s.rules || '', welcome: s.welcome || '', requireRules: !!s.require_rules,
+    rulesAccepted: !s.require_rules || s.owner_id === viewerId || !!me?.rules_accepted_at,
   };
 }
 
@@ -197,15 +207,24 @@ function messageOut(m) {
   ).all(m.id).map((a) => ({ id: a.media_id, mime: a.mime, size: a.size, filename: a.filename, spoiler: !!a.spoiler }));
   let meta = null;
   if (m.meta && !m.deleted) try { meta = JSON.parse(m.meta); } catch {}
+  let poll = null;
+  if (meta?.poll && !m.deleted) {
+    const votes = q('SELECT user_id, option FROM channel_poll_votes WHERE message_id = ?').all(m.id);
+    poll = { ...meta.poll, votes: meta.poll.options.map((_, i) => votes.filter((v) => v.option === i).map((v) => v.user_id)) };
+  }
+  // Webhooks post as whatever name and picture they were given.
+  const hook = meta?.webhook ? { id: 0, username: meta.webhook.name, displayName: meta.webhook.name, avatar: meta.webhook.avatar || null, nickname: null, bot: true } : null;
   return {
-    id: m.id, channelId: m.channel_id, serverId: ch?.server_id ?? null, clientId: m.client_id, kind: m.kind,
+    id: m.id, channelId: m.channel_id, serverId: ch?.server_id ?? null, clientId: m.client_id,
+    // Polls are stored as ordinary messages (with the poll in meta) but shown as their own kind.
+    kind: meta?.poll ? 'poll' : meta?.event && m.kind === 'system' ? 'event' : m.kind,
     // Server avatar wins over the main one, like Discord.
-    author: author ? { id: author.id, username: author.username, displayName: author.display_name, avatar: sm?.avatar_media || author.avatar_media, nickname: nickname ?? null } : null,
+    author: hook || (author ? { id: author.id, username: author.username, displayName: author.display_name, avatar: sm?.avatar_media || author.avatar_media, nickname: nickname ?? null } : null),
     body: m.deleted ? '' : m.body,
     replyTo: m.reply_to, createdAt: m.created_at, editedAt: m.edited_at, deleted: !!m.deleted,
     pinned: !!m.pinned_at, mentionsEveryone: !!m.mentions_everyone,
     reactions: [...reactions].map(([emoji, userIds]) => ({ emoji, userIds })),
-    attachments, meta,
+    attachments, meta, poll,
     // Custom emojis used in the text or as reactions, so anyone can draw them.
     emojis: m.deleted ? [] : emojisById(emojiIdsIn(m.body, ...reactions.keys())),
   };
@@ -268,6 +287,8 @@ function postSystem(channelId, kind, authorId, meta = null) {
 export function sendChannelMessage(userId, channelId, input, { viaGifPicker = false } = {}) {
   const { channel, perms } = requireChannel(channelId, userId);
   if (channel.type === 'category') throw bad('You can’t post in a category');
+  if (channel.is_forum) throw bad('Start a post in a forum instead');
+  requireRulesAccepted(channel.server_id, userId);
   if (!has(perms, P.SEND_MESSAGES)) {
     throw forbidden(channel.type === 'thread' && channel.locked ? 'This thread is locked' : 'You can’t send messages here');
   }
@@ -278,7 +299,7 @@ export function sendChannelMessage(userId, channelId, input, { viaGifPicker = fa
     const dupe = q('SELECT * FROM channel_messages WHERE author_id = ? AND client_id = ?').get(userId, clientId);
     if (dupe) return messageOut(dupe);
   }
-  const body = cleanEmojiTokens(typeof input.body === 'string' ? input.body.trim() : '', userId);
+  const body = cleanEmojiTokens(typeof input.body === 'string' ? input.body.trim() : '', userId, channel.server_id);
   if (body.length > MAX_BODY) throw bad(`Message is too long (max ${MAX_BODY})`);
   const attachmentIds = Array.isArray(input.attachments) ? input.attachments.slice(0, 10).map(String) : [];
   if (!body && !attachmentIds.length) throw bad('Message is empty');
@@ -315,15 +336,27 @@ export function sendChannelMessage(userId, channelId, input, { viaGifPicker = fa
     return id;
   });
 
+  return deliverMessage(channel, id);
+}
+
+/** Tells everyone who can see the channel about a new message, and counts pings. */
+function deliverMessage(channel, id) {
   const audience = audienceOf(channel.id);
   const pinged = pingedUsers(id, channel.server_id, audience);
   const bump = q(`INSERT INTO channel_reads (user_id, channel_id, mention_count) VALUES (?, ?, 1)
                   ON CONFLICT(user_id, channel_id) DO UPDATE SET mention_count = mention_count + 1`);
   for (const uid of pinged) bump.run(uid, channel.id);
-
   const message = messageOut(q('SELECT * FROM channel_messages WHERE id = ?').get(id));
   for (const uid of audience) sendToUser(uid, { type: 'channel.message', message, mentioned: pinged.includes(uid) });
   return message;
+}
+
+/** Servers can make you accept their rules before you post. */
+function requireRulesAccepted(serverId, userId) {
+  const s = getServer(serverId);
+  if (!s?.require_rules || s.owner_id === userId) return;
+  const m = q('SELECT rules_accepted_at FROM server_members WHERE server_id = ? AND user_id = ?').get(serverId, userId);
+  if (!m?.rules_accepted_at) throw new HttpError(403, 'Accept the server rules first', 'rules');
 }
 
 export function markChannelRead(userId, channelId, messageId) {
@@ -771,8 +804,9 @@ route('POST', '/api/servers/:id/channels', ({ user, params, body }) => {
   const parentId = validParent(s.id, body.parentId, type) ?? null;
   const position = int(body.position, 'position') ??
     q('SELECT COALESCE(MAX(position), -1) + 1 AS p FROM channels WHERE server_id = ? AND parent_id IS ? AND type != ?').get(s.id, parentId, 'thread').p;
-  const id = Number(q('INSERT INTO channels (server_id, type, name, parent_id, topic, position, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)')
-    .run(s.id, type, name, parentId, str(body.topic, 1024, 'topic') || '', position, Date.now()).lastInsertRowid);
+  // Forums are text channels where every post is its own thread.
+  const id = Number(q('INSERT INTO channels (server_id, type, name, parent_id, topic, position, created_at, is_forum) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
+    .run(s.id, type === 'forum' ? 'text' : type, name, parentId, str(body.topic, 1024, 'topic') || '', position, Date.now(), type === 'forum' ? 1 : 0).lastInsertRowid);
   // A private channel: hidden from @everyone, visible to the roles listed.
   if (body.private) {
     const everyone = q('SELECT id FROM roles WHERE server_id = ? AND is_default = 1').get(s.id).id;
@@ -900,6 +934,26 @@ route('POST', '/api/channels/:id/threads', ({ user, params, body }) => {
     if (!starter) throw bad('Message not found in this channel');
     if (q("SELECT 1 FROM channels WHERE starter_message_id = ? AND type = 'thread'").get(starter.id)) throw bad('That message already has a thread');
   }
+  if (c.is_forum) {
+    // A forum post: a title and a first message, which becomes the post itself.
+    requireRulesAccepted(c.server_id, user.id);
+    const title = (str(body.name, 100, 'name') || '').trim();
+    if (!title) throw bad('Give your post a title');
+    const first = typeof body.body === 'string' ? body.body.trim() : '';
+    if (!first && !(Array.isArray(body.attachments) && body.attachments.length)) throw bad('Write something for your post');
+    const id = Number(q("INSERT INTO channels (server_id, type, name, parent_id, owner_id, created_at) VALUES (?, 'thread', ?, ?, ?, ?)")
+      .run(c.server_id, title, c.id, user.id, Date.now()).lastInsertRowid);
+    try {
+      sendChannelMessage(user.id, id, { body: first, attachments: body.attachments });
+    } catch (e) {
+      q('DELETE FROM channels WHERE id = ?').run(id);
+      throw e;
+    }
+    q('UPDATE channels SET last_message_id = (SELECT MAX(id) FROM channel_messages WHERE channel_id = ?) WHERE id = ?').run(id, c.id);
+    const thread = channelOut(getChannel(id), user.id);
+    sendToChannel(c.id, { type: 'channel.thread.create', thread });
+    return thread;
+  }
   const name = channelName(str(body.name, 100, 'name') || (starter?.body || '').slice(0, 40) || 'thread', 'thread') || 'thread';
   const id = Number(q("INSERT INTO channels (server_id, type, name, parent_id, owner_id, starter_message_id, created_at) VALUES (?, 'thread', ?, ?, ?, ?, ?)")
     .run(c.server_id, name, c.id, user.id, starter?.id ?? null, Date.now()).lastInsertRowid);
@@ -979,7 +1033,7 @@ function requireMessage(messageId, userId) {
 route('PATCH', '/api/channel-messages/:id', ({ user, params, body }) => {
   const { m, channel } = requireMessage(Number(params.id), user.id);
   if (m.author_id !== user.id || m.deleted || m.kind !== 'default') throw forbidden('You can only edit your own messages');
-  const text = cleanEmojiTokens(typeof body.body === 'string' ? body.body.trim() : '', user.id);
+  const text = cleanEmojiTokens(typeof body.body === 'string' ? body.body.trim() : '', user.id, channel.server_id);
   if (!text && !q('SELECT 1 FROM channel_attachments WHERE message_id = ?').get(m.id)) throw bad('Message is empty');
   if (text.length > MAX_BODY) throw bad(`Message is too long (max ${MAX_BODY})`);
   q('UPDATE channel_messages SET body = ?, edited_at = ? WHERE id = ?').run(text, Date.now(), m.id);
@@ -1007,7 +1061,8 @@ route('PUT', '/api/channel-messages/:id/reactions/:emoji', ({ user, params }) =>
   const exists = q('SELECT 1 FROM channel_reactions WHERE message_id = ? AND emoji = ?').get(m.id, emoji);
   // Custom emojis: anyone can join one that's already there, but only the owner can start it.
   const custom = customReaction(emoji);
-  if (custom && !exists && (custom.missing || custom.user_id !== user.id)) throw bad('You can only react with your own custom emojis');
+  if (custom && !exists && !canUseEmoji(custom, user.id, channel.server_id)) throw bad('You can only react with your own emojis or this server’s');
+  requireRulesAccepted(channel.server_id, user.id);
   // Anyone who can see a message can pile onto an existing reaction; starting a new one needs ADD_REACTIONS.
   if (!exists && !has(perms, P.ADD_REACTIONS)) throw forbidden();
   if (q('SELECT COUNT(DISTINCT emoji) AS n FROM channel_reactions WHERE message_id = ?').get(m.id).n >= 20 && !exists) throw bad('That message has enough reactions');
@@ -1059,3 +1114,10 @@ route('GET', '/api/servers/:id/search', ({ user, params, query }) => {
   return q(`SELECT * FROM channel_messages WHERE channel_id IN (${visible.map(() => '?').join(',')}) AND deleted = 0 AND body LIKE ? ESCAPE '\\' ORDER BY id DESC LIMIT 50`)
     .all(...visible, like).map(messageOut);
 });
+
+// Shared with community.js (events, polls, webhooks, rules, server emojis).
+export const internals = {
+  requireServer, requireServerPerm, requireChannel, requireMessage, requireRulesAccepted, audit,
+  sendToChannel, sendToServer, refreshServer, channelOut, messageOut, storeMessage, deliverMessage, postSystem,
+  getServer, getChannel, isMember, memberIds, str, bad, notFound, forbidden,
+};

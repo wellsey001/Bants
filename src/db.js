@@ -428,6 +428,62 @@ db.exec(`CREATE TABLE IF NOT EXISTS user_emojis (
   created_at INTEGER NOT NULL,
   UNIQUE (user_id, name)
 )`);
+// ── Servers, round two: forums, rules, server emojis, polls, events and webhooks ──
+if (!hasColumn('channels', 'is_forum')) db.exec('ALTER TABLE channels ADD COLUMN is_forum INTEGER NOT NULL DEFAULT 0');
+if (!hasColumn('servers', 'rules')) db.exec("ALTER TABLE servers ADD COLUMN rules TEXT NOT NULL DEFAULT ''");
+if (!hasColumn('servers', 'welcome')) db.exec("ALTER TABLE servers ADD COLUMN welcome TEXT NOT NULL DEFAULT ''");
+if (!hasColumn('servers', 'require_rules')) db.exec('ALTER TABLE servers ADD COLUMN require_rules INTEGER NOT NULL DEFAULT 0');
+if (!hasColumn('server_members', 'rules_accepted_at')) db.exec('ALTER TABLE server_members ADD COLUMN rules_accepted_at INTEGER');
+db.exec(`
+CREATE TABLE IF NOT EXISTS server_emojis (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  server_id INTEGER NOT NULL REFERENCES servers(id) ON DELETE CASCADE,
+  name TEXT NOT NULL,
+  media_id TEXT NOT NULL,
+  animated INTEGER NOT NULL DEFAULT 0,
+  created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at INTEGER NOT NULL,
+  UNIQUE (server_id, name)
+);
+CREATE TABLE IF NOT EXISTS channel_poll_votes (
+  message_id INTEGER NOT NULL REFERENCES channel_messages(id) ON DELETE CASCADE,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  option INTEGER NOT NULL,
+  PRIMARY KEY (message_id, user_id, option)
+);
+CREATE TABLE IF NOT EXISTS server_events (
+  id INTEGER PRIMARY KEY,
+  server_id INTEGER NOT NULL REFERENCES servers(id) ON DELETE CASCADE,
+  channel_id INTEGER REFERENCES channels(id) ON DELETE SET NULL,
+  title TEXT NOT NULL,
+  description TEXT NOT NULL DEFAULT '',
+  location TEXT NOT NULL DEFAULT '',
+  starts_at INTEGER NOT NULL,
+  ends_at INTEGER,
+  created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at INTEGER NOT NULL,
+  reminded INTEGER NOT NULL DEFAULT 0,
+  started INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_server_events ON server_events(server_id, starts_at);
+CREATE TABLE IF NOT EXISTS event_rsvps (
+  event_id INTEGER NOT NULL REFERENCES server_events(id) ON DELETE CASCADE,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  status TEXT NOT NULL CHECK (status IN ('going','interested')),
+  PRIMARY KEY (event_id, user_id)
+);
+CREATE TABLE IF NOT EXISTS webhooks (
+  id INTEGER PRIMARY KEY,
+  channel_id INTEGER NOT NULL REFERENCES channels(id) ON DELETE CASCADE,
+  name TEXT NOT NULL,
+  avatar_media TEXT,
+  token TEXT NOT NULL,
+  created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at INTEGER NOT NULL
+);
+`);
+// Server emoji ids start high so they never clash with personal ones in <:name:id>.
+if (!db.prepare('SELECT 1 FROM sqlite_sequence WHERE name = ?').get('server_emojis')) db.prepare("INSERT INTO sqlite_sequence (name, seq) VALUES ('server_emojis', 1000000000)").run();
 
 // The first account on the server runs it.
 if (!db.prepare('SELECT 1 FROM users WHERE is_admin = 1').get()) {

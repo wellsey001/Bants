@@ -17,6 +17,7 @@ import {
 } from './api.js';
 import './push.js';
 import { sendChannelMessage, sendChannelTyping, markChannelRead, notifyServerPresence } from './servers.js';
+import './community.js';
 import { handleCallMessage, onSessionGone } from './calls.js';
 import { scheduleBackups } from './backup.js';
 
