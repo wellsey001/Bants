@@ -196,7 +196,8 @@ export function handleCallMessage(userId, tokenHash, msg) {
       // Muted / deafened / camera, shown next to your name in the channel list.
       const g = calls.get(busy.get(userId));
       if (!g?.voice || g.participants.get(userId) !== tokenHash) return null;
-      g.flags.set(userId, { muted: !!msg.muted, deafened: !!msg.deafened, video: !!msg.video });
+      // video = camera on, screen = sharing their screen ("live").
+      g.flags.set(userId, { muted: !!msg.muted, deafened: !!msg.deafened, video: !!msg.video, screen: !!msg.screen });
       broadcastVoice(g.channelId);
       return null;
     }
@@ -260,7 +261,7 @@ export function onSessionGone(userId, tokenHash) {
 export function voiceMembers(channelId) {
   const g = calls.get(voiceRooms.get(channelId));
   if (!g) return [];
-  return [...g.participants.keys()].map((id) => ({ id, ...(g.flags.get(id) || { muted: false, deafened: false, video: false }) }));
+  return [...g.participants.keys()].map((id) => ({ id, ...(g.flags.get(id) || { muted: false, deafened: false, video: false, screen: false }) }));
 }
 
 /** Tell everyone in the server who can see the channel who's in it now. */

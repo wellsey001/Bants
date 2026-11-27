@@ -209,7 +209,15 @@ try {
     daveWs.json({ type: 'voice.update', muted: true });
     const muted = await ownerWs.waitFor((e) => e.type === 'voice.state' && e.members.some((m) => m.id === dave.user.id && m.muted));
     assert.equal(muted.members.length, 2);
-    // Owner leaves: room stays open for Dave
+    // Camera and screen share show up too
+    daveWs.json({ type: 'voice.update', muted: true, video: true, screen: true });
+    await ownerWs.waitFor((e) => e.type === 'voice.state' && e.members.some((m) => m.id === dave.user.id && m.video && m.screen));
+    // Voice channels have their own text chat, with unread dots
+    const vm = await api('POST', `/api/channels/${voice.id}/messages`, { token: dave.token, body: { body: 'can you see my screen?' } });
+    assert.equal(vm.status, 200);
+    const vview = (await api('GET', `/api/servers/${server.id}`, { token: owner.token })).data;
+    assert.equal(vview.channels.find((c) => c.id === voice.id).unread, true);
+        // Owner leaves: room stays open for Dave
     ownerWs.json({ type: 'call.end', callId: joined.call.id });
     await daveWs.waitFor((e) => e.type === 'call.participant.left' && e.userId === owner.user.id);
     const after = await daveWs.waitFor((e) => e.type === 'voice.state' && e.members.length === 1);

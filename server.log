@@ -1,0 +1,3 @@
+[push] FCM_SERVICE_ACCOUNT not set. Push notifications disabled.
+bants-server listening on :18555 (data in /home/claude/uitest/data)
+registration: open

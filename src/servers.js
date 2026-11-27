@@ -113,7 +113,8 @@ function channelOut(c, viewerId, perms = channelPermissions(c.id, viewerId)) {
     id: c.id, serverId: c.server_id, type: c.type, parentId: c.parent_id, name: c.name, topic: c.topic,
     position: c.position, slowmode: c.slowmode_s, nsfw: !!c.nsfw, syncPerms: !!c.sync_perms,
     lastMessageId: c.last_message_id,
-    unread: c.type !== 'category' && c.type !== 'voice' && c.last_message_id > (read?.last_read || 0),
+    // Voice channels have their own text chat too, so they get unread dots like text channels.
+    unread: c.type !== 'category' && c.last_message_id > (read?.last_read || 0),
     mentionCount: read?.mention_count || 0,
     permissions: perms,
   };
