@@ -482,6 +482,13 @@ CREATE TABLE IF NOT EXISTS webhooks (
   created_at INTEGER NOT NULL
 );
 `);
+// Notifications per channel: 'all', 'mentions' or 'none'. No row = the server's default.
+db.exec(`CREATE TABLE IF NOT EXISTS channel_notify (
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  channel_id INTEGER NOT NULL REFERENCES channels(id) ON DELETE CASCADE,
+  level TEXT NOT NULL CHECK (level IN ('all','mentions','none')),
+  PRIMARY KEY (user_id, channel_id)
+)`);
 // Server emoji ids start high so they never clash with personal ones in <:name:id>.
 if (!db.prepare('SELECT 1 FROM sqlite_sequence WHERE name = ?').get('server_emojis')) db.prepare("INSERT INTO sqlite_sequence (name, seq) VALUES ('server_emojis', 1000000000)").run();
 

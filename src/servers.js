@@ -4,6 +4,7 @@ import crypto from 'node:crypto';
 import { q, tx } from './db.js';
 import { route, HttpError, getUser, mediaAccessChecks, requireImage, deleteMediaIfUnused, saveMediaBuffer, areContacts, isBlocked, sharedServerUsers } from './api.js';
 import { sendToUser, isOnline } from './hub.js';
+import { pushToUser } from './push.js';
 import { voiceMembers, leaveVoiceIn, recheckVoice } from './calls.js';
 import { emojiIdsIn, emojisById, cleanEmojiTokens, customReaction, canUseEmoji, emojiOut } from './emojis.js';
 import { gifsEnabled, downloadGif } from './gifs.js';
@@ -119,6 +120,8 @@ function channelOut(c, viewerId, perms = channelPermissions(c.id, viewerId)) {
     unread: c.type !== 'category' && c.last_message_id > (read?.last_read || 0),
     mentionCount: read?.mention_count || 0,
     permissions: perms,
+    // Your notification setting for this channel (null = the server's default).
+    notify: q('SELECT level FROM channel_notify WHERE user_id = ? AND channel_id = ?').get(viewerId, c.id)?.level ?? null,
   };
   if (c.type === 'voice') {
     out.userLimit = c.voice_limit;
@@ -348,7 +351,36 @@ function deliverMessage(channel, id) {
   for (const uid of pinged) bump.run(uid, channel.id);
   const message = messageOut(q('SELECT * FROM channel_messages WHERE id = ?').get(id));
   for (const uid of audience) sendToUser(uid, { type: 'channel.message', message, mentioned: pinged.includes(uid) });
+  pushChannelMessage(channel, message, audience, pinged);
   return message;
+}
+
+/**
+ * What someone gets told about in a channel: their own setting for it, or the server's default
+ * (everything, or only @mentions if they've muted the server). Threads follow their channel.
+ */
+export function notifyLevel(userId, channel) {
+  const own = q('SELECT level FROM channel_notify WHERE user_id = ? AND channel_id = ?').get(userId, channel.id)?.level;
+  if (own) return own;
+  if (channel.type === 'thread' && channel.parent_id) {
+    const parent = q('SELECT level FROM channel_notify WHERE user_id = ? AND channel_id = ?').get(userId, channel.parent_id)?.level;
+    if (parent) return parent;
+  }
+  return q('SELECT muted FROM server_members WHERE server_id = ? AND user_id = ?').get(channel.server_id, userId)?.muted ? 'mentions' : 'all';
+}
+
+/** Phones that aren't connected get a push (ids only: the phone fetches the message from here). */
+function pushChannelMessage(channel, message, audience, pinged) {
+  for (const uid of audience) {
+    if (uid === message.author?.id || isOnline(uid)) continue;
+    const mentioned = pinged.includes(uid);
+    const level = notifyLevel(uid, channel);
+    if (level === 'none' || (level === 'mentions' && !mentioned)) continue;
+    pushToUser(uid, {
+      type: 'channel_message', serverId: channel.server_id, channelId: channel.id, messageId: message.id,
+      mentioned: mentioned ? '1' : '0',
+    }).catch(() => {});
+  }
 }
 
 /** Servers can make you accept their rules before you post. */
@@ -1112,6 +1144,42 @@ route('GET', '/api/servers/:id/search', ({ user, params, query }) => {
   if (!visible.length) return [];
   const like = `%${text.replace(/[\\%_]/g, (ch) => '\\' + ch)}%`;
   return q(`SELECT * FROM channel_messages WHERE channel_id IN (${visible.map(() => '?').join(',')}) AND deleted = 0 AND body LIKE ? ESCAPE '\\' ORDER BY id DESC LIMIT 50`)
+    .all(...visible, like).map(messageOut);
+});
+
+route('PUT', '/api/channels/:id/notify', ({ user, params, body }) => {
+  const { channel } = requireChannel(Number(params.id), user.id);
+  const level = ['all', 'mentions', 'none'].includes(body.level) ? body.level : null;
+  if (level) q('INSERT INTO channel_notify (user_id, channel_id, level) VALUES (?, ?, ?) ON CONFLICT(user_id, channel_id) DO UPDATE SET level = excluded.level').run(user.id, channel.id, level);
+  else q('DELETE FROM channel_notify WHERE user_id = ? AND channel_id = ?').run(user.id, channel.id);
+  return { level, effective: notifyLevel(user.id, channel) };
+});
+
+/** One message, with where it is: for building a notification on the phone. */
+route('GET', '/api/channel-messages/:id', ({ user, params }) => {
+  const { m, channel, perms } = requireMessage(Number(params.id), user.id);
+  if (!has(perms, P.READ_HISTORY)) throw notFound('Message not found');
+  const s = getServer(channel.server_id);
+  const parent = channel.type === 'thread' ? getChannel(channel.parent_id) : null;
+  return {
+    message: messageOut(m),
+    channel: { id: channel.id, name: channel.name, type: channel.type, parentName: parent?.name ?? null },
+    server: { id: s.id, name: s.name, icon: s.icon_media },
+    mentioned: !!q(`SELECT 1 FROM channel_mentions WHERE message_id = ? AND ((target_type = 'user' AND target_id = ?)
+                    OR (target_type = 'role' AND target_id IN (SELECT role_id FROM member_roles WHERE server_id = ? AND user_id = ?)))`).get(m.id, user.id, s.id, user.id) || !!m.mentions_everyone,
+  };
+});
+
+/** Search every server you're in at once. */
+route('GET', '/api/servers-search', ({ user, query }) => {
+  const text = String(query.q || '').trim();
+  if (text.length < 2) return [];
+  const visible = q(`SELECT c.id FROM channels c JOIN server_members m ON m.server_id = c.server_id
+                     WHERE m.user_id = ? AND c.type != 'category'`).all(user.id)
+    .filter((c) => has(channelPermissions(c.id, user.id), P.VIEW_CHANNEL | P.READ_HISTORY)).map((c) => c.id);
+  if (!visible.length) return [];
+  const like = `%${text.replace(/[\\%_]/g, (ch) => '\\' + ch)}%`;
+  return q(`SELECT * FROM channel_messages WHERE channel_id IN (${visible.map(() => '?').join(',')}) AND deleted = 0 AND body LIKE ? ESCAPE '\\' ORDER BY id DESC LIMIT 60`)
     .all(...visible, like).map(messageOut);
 });
 

@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { config } from './config.js';
 import { q } from './db.js';
-import { route, HttpError, deleteMediaIfUnused } from './api.js';
+import { route, HttpError, deleteMediaIfUnused, emojiHooks } from './api.js';
 import { sendToUser } from './hub.js';
 
 export const MAX_EMOJIS = 50;
@@ -13,6 +13,16 @@ const NAME = /^[A-Za-z0-9_]{2,32}$/;
 const TOKEN = /<(a?):([A-Za-z0-9_]{2,32}):(\d{1,12})>/g;
 const IMAGE_TYPES = new Set(['image/png', 'image/jpeg', 'image/webp', 'image/gif']);
 const bad = (msg) => new HttpError(400, msg);
+
+// Chats (api.js) use these through emojiHooks.
+Object.assign(emojiHooks, {
+  clean: (text, userId) => cleanEmojiTokens(text, userId),
+  lookup: (body, reactionEmojis) => emojisById(emojiIdsIn(body, ...reactionEmojis)),
+  reactionOk: (emoji, userId) => {
+    const e = customReaction(emoji);
+    return !!e && !e.missing && e.server_id == null && e.user_id === userId;
+  },
+});
 
 export const emojiOut = (e) => ({ id: e.id, name: e.name, media: e.media_id, animated: !!e.animated, userId: e.user_id ?? null, serverId: e.server_id ?? null });
 

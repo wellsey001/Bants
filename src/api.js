@@ -109,6 +109,8 @@ export function messageOut(m) {
     mediaInfo: media ? { mime: media.mime, size: media.size, filename: media.filename } : null,
     meta,
     expiresAt: m.expires_at ?? null,
+    // Custom emojis in the text or reactions, so everyone can draw them.
+    emojis: m.deleted ? [] : emojiHooks.lookup(m.body, reactions.map((r) => r.emoji)),
   };
 }
 
@@ -216,6 +218,8 @@ function str(v, max, field) {
 }
 /** Extra checks other modules add (servers.js: server icons and channel attachments). */
 export const mediaAccessChecks = [];
+/** Filled in by emojis.js (it imports this file, so it can't be imported back): custom emojis in chats. */
+export const emojiHooks = { clean: (text) => text, lookup: () => [], reactionOk: () => false };
 
 /** Whether someone may see a file: theirs, their sticker, an avatar, or used in one of their chats or servers. */
 function canSeeMedia(m, userId) {
@@ -362,7 +366,7 @@ export function sendMessage(userId, convId, input) {
     if (dup) return { message: messageOut(dup), duplicate: true };
   }
 
-  let body = str(input.body ?? input.text ?? '', 10_000, 'body') || '';
+  let body = emojiHooks.clean(str(input.body ?? input.text ?? '', 10_000, 'body') || '', userId);
   const media = requireMedia(input.media, userId);
   const extra = {};
   let kind = 'text';
@@ -984,7 +988,7 @@ route('PATCH', '/api/messages/:id', ({ user, params, body }) => {
   if (!m || m.sender_id !== user.id || m.deleted) throw notFound('Message not found');
   if (m.kind !== 'text') throw bad('Only text messages can be edited');
   if (Date.now() - m.created_at > 15 * 60_000) throw forbidden('Messages can only be edited for 15 minutes');
-  const text = str(body.body, 10_000, 'body');
+  const text = emojiHooks.clean(str(body.body, 10_000, 'body'), user.id);
   if (!text) throw bad('Message is empty');
   q('UPDATE messages SET body = ?, edited_at = ? WHERE id = ?').run(text, Date.now(), m.id);
   const out = messageOut(q('SELECT * FROM messages WHERE id = ?').get(m.id));
@@ -1114,7 +1118,11 @@ route('POST', '/api/messages/:id/react', ({ user, params, body }) => {
   if (!m || m.deleted || m.kind === 'system') throw notFound('Message not found');
   requireMember(m.conversation_id, user.id);
   const emoji = typeof body.emoji === 'string' ? body.emoji.trim() : '';
-  if (!emoji || emoji.length > 32) throw bad('Pick an emoji'); // room for family and flag emojis
+  if (!emoji || emoji.length > 64) throw bad('Pick an emoji'); // room for family and flag emojis, and <a:name:id>
+  // Custom emojis: yours, or one somebody already reacted with.
+  if (emoji.startsWith('<') && !emojiHooks.reactionOk(emoji, user.id) && !q('SELECT 1 FROM reactions WHERE message_id = ? AND emoji = ?').get(m.id, emoji)) {
+    throw bad('You can only react with your own custom emojis');
+  }
   const existing = q('SELECT emoji FROM reactions WHERE message_id = ? AND user_id = ?').get(m.id, user.id);
   if (existing && existing.emoji === emoji) {
     q('DELETE FROM reactions WHERE message_id = ? AND user_id = ?').run(m.id, user.id);
@@ -1286,6 +1294,8 @@ route('GET', '/api/admin/overview', ({ user }) => {
     conversations: count('SELECT COUNT(*) AS n FROM conversations'),
     messages: count("SELECT COUNT(*) AS n FROM messages WHERE kind != 'system'"),
     mediaFiles: count('SELECT COUNT(*) AS n FROM media'),
+    servers: count('SELECT COUNT(*) AS n FROM servers'),
+    channelMessages: count('SELECT COUNT(*) AS n FROM channel_messages WHERE deleted = 0'),
     mediaBytes: q('SELECT COALESCE(SUM(size), 0) AS n FROM media').get().n,
     dbBytes,
     push: !!config.fcmServiceAccount,

@@ -445,6 +445,33 @@ try {
     assert.equal((await api('POST', path.replace(/[^/]+$/, 'wrong'), { body: { content: 'x' } })).status, 404);
   });
 
+  await step('notification levels, one-message fetch, search across servers, custom emojis in chats', async () => {
+    const r = await api('PUT', `/api/channels/${general.id}/notify`, { token: dave.token, body: { level: 'mentions' } });
+    assert.deepEqual(r.data, { level: 'mentions', effective: 'mentions' });
+    const srv = (await api('GET', `/api/servers/${server.id}`, { token: dave.token })).data;
+    assert.equal(srv.channels.find((c) => c.id === general.id).notify, 'mentions');
+    await api('PUT', `/api/channels/${general.id}/notify`, { token: dave.token, body: { level: null } });
+    const sent = (await api('POST', `/api/channels/${general.id}/messages`, { token: owner.token, body: { body: `findme across servers <@${dave.user.id}>` } })).data;
+    const one = (await api('GET', `/api/channel-messages/${sent.id}`, { token: dave.token })).data;
+    assert.equal(one.channel.name, 'general');
+    assert.equal(one.mentioned, true);
+    const found = (await api('GET', '/api/servers-search?q=findme', { token: dave.token })).data;
+    assert.ok(found.some((m) => m.id === sent.id));
+    // Custom emoji in a direct chat
+    const conv = (await api('POST', '/api/conversations', { token: dave.token, body: { type: 'direct', userId: owner.user.id } })).data;
+    const mine = (await api('GET', '/api/emojis', { token: dave.token })).data.emojis[0];
+    const tok = `<:${mine.name}:${mine.id}>`;
+    const dm = (await api('POST', `/api/conversations/${conv.id}/messages`, { token: dave.token, body: { body: `hi ${tok}`, clientId: 'emo-dm' } })).data;
+    const msg = dm.message || dm;
+    assert.equal(msg.body, `hi ${tok}`);
+    assert.equal(msg.emojis.length, 1);
+    const stolen = (await api('POST', `/api/conversations/${conv.id}/messages`, { token: owner.token, body: { body: `me too ${tok}`, clientId: 'emo-dm2' } })).data;
+    assert.equal((stolen.message || stolen).body, `me too :${mine.name}:`);
+    assert.equal((await api('POST', `/api/messages/${msg.id}/react`, { token: owner.token, body: { emoji: tok } })).status, 400);
+    assert.equal((await api('POST', `/api/messages/${msg.id}/react`, { token: dave.token, body: { emoji: tok } })).status, 200);
+    assert.equal((await api('POST', `/api/messages/${msg.id}/react`, { token: owner.token, body: { emoji: tok } })).status, 200, 'can join an existing one');
+  });
+
   await step('leaving, and the owner can’t leave without handing over', async () => {
     assert.equal((await api('POST', `/api/servers/${server.id}/leave`, { token: owner.token })).status, 400);
     assert.equal((await api('POST', `/api/servers/${server.id}/leave`, { token: dave.token })).status, 200);
