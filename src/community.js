@@ -351,3 +351,59 @@ route('POST', '/api/webhooks/:id/:token', async ({ params, body, req }) => {
   const message = I.deliverMessage(channel, id);
   return req.url.includes('wait=true') ? message : { ok: true };
 }, { auth: false });
+
+// ───────────────────────── soundboard ─────────────────────────
+// Short clips anyone in a voice channel can play for everyone. Each server keeps up to 30;
+// favourite one and you can play it in any server (like Nitro).
+
+const MAX_SOUNDS = 30;
+const soundOut = (r, viewerId) => ({
+  id: r.id, serverId: r.server_id, name: r.name, emoji: r.emoji, media: r.media_id, volume: r.volume,
+  favourite: !!q('SELECT 1 FROM sound_favourites WHERE user_id = ? AND sound_id = ?').get(viewerId, r.id),
+});
+
+route('GET', '/api/servers/:id/sounds', ({ user, params }) => {
+  const s = I.requireServer(Number(params.id), user.id);
+  return q('SELECT * FROM server_sounds WHERE server_id = ? ORDER BY name COLLATE NOCASE').all(s.id).map((r) => soundOut(r, user.id));
+});
+
+route('POST', '/api/servers/:id/sounds', ({ user, params, body }) => {
+  const s = I.requireServerPerm(Number(params.id), user.id, P.MANAGE_EMOJIS);
+  if (q('SELECT COUNT(*) AS n FROM server_sounds WHERE server_id = ?').get(s.id).n >= MAX_SOUNDS) throw bad(`This server has ${MAX_SOUNDS} sounds already`);
+  const name = String(body.name || '').trim().slice(0, 32);
+  if (!name) throw bad('Give the sound a name');
+  const media = q('SELECT * FROM media WHERE id = ?').get(String(body.media || ''));
+  if (!media || media.uploader_id !== user.id) throw bad('Upload the sound first');
+  if (!media.mime.startsWith('audio/')) throw bad('That needs to be a sound (MP3, OGG, WAV…)');
+  if (media.size > 1024 * 1024) throw bad('Keep sounds under 1 MB (about 5 seconds)');
+  const emoji = String(body.emoji || '🔊').slice(0, 16);
+  const volume = Math.min(1, Math.max(0.1, Number(body.volume) || 1));
+  const id = Number(q('INSERT INTO server_sounds (server_id, name, emoji, media_id, volume, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)')
+    .run(s.id, name, emoji, media.id, volume, user.id, Date.now()).lastInsertRowid);
+  I.audit(s.id, user.id, 'sound.create', id, { name });
+  I.sendToServer(s.id, { type: 'server.sounds', serverId: s.id });
+  return soundOut(q('SELECT * FROM server_sounds WHERE id = ?').get(id), user.id);
+});
+
+route('DELETE', '/api/sounds/:id', ({ user, params }) => {
+  const r = q('SELECT * FROM server_sounds WHERE id = ?').get(Number(params.id));
+  if (!r) throw notFound('Sound not found');
+  I.requireServerPerm(r.server_id, user.id, P.MANAGE_EMOJIS);
+  q('DELETE FROM server_sounds WHERE id = ?').run(r.id);
+  deleteMediaIfUnused(r.media_id);
+  I.sendToServer(r.server_id, { type: 'server.sounds', serverId: r.server_id });
+  return { ok: true };
+});
+
+route('PUT', '/api/sounds/:id/favourite', ({ user, params, body }) => {
+  const r = q('SELECT * FROM server_sounds WHERE id = ?').get(Number(params.id));
+  if (!r) throw notFound('Sound not found');
+  I.requireServer(r.server_id, user.id);
+  if (body.favourite === false) q('DELETE FROM sound_favourites WHERE user_id = ? AND sound_id = ?').run(user.id, r.id);
+  else q('INSERT OR IGNORE INTO sound_favourites (user_id, sound_id) VALUES (?, ?)').run(user.id, r.id);
+  return soundOut(r, user.id);
+});
+
+/** Your favourite sounds, playable in any server. */
+route('GET', '/api/me/sounds', ({ user }) =>
+  q('SELECT s.* FROM sound_favourites f JOIN server_sounds s ON s.id = f.sound_id WHERE f.user_id = ? ORDER BY s.name COLLATE NOCASE').all(user.id).map((r) => soundOut(r, user.id)));

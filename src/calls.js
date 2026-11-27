@@ -192,6 +192,43 @@ export function handleCallMessage(userId, tokenHash, msg) {
     case 'voice.join':
       return joinVoice(userId, tokenHash, Number(msg.channelId));
 
+    case 'voice.sound': {
+      // Soundboard: play a sound for everyone in your voice channel.
+      const g = calls.get(busy.get(userId));
+      if (!g?.voice || g.participants.get(userId) !== tokenHash) throw bad('Join a voice channel first');
+      if (g.stage && !g.speakers.has(userId)) throw bad('Only speakers can use the soundboard on a stage');
+      const now = Date.now();
+      if (now - (soundRate.get(userId) || 0) < 1500) return null; // no spamming the air horn
+      soundRate.set(userId, now);
+      const sound = q('SELECT * FROM server_sounds WHERE id = ?').get(Number(msg.soundId));
+      if (!sound) throw bad('That sound’s gone');
+      // This server's sounds, or your favourites from any server (like Nitro).
+      if (sound.server_id !== g.serverId && !q('SELECT 1 FROM sound_favourites WHERE user_id = ? AND sound_id = ?').get(userId, sound.id)) throw bad('That sound isn’t in this server');
+      playInRoom(g, userId, { id: sound.id, name: sound.name, emoji: sound.emoji, media: sound.media_id, volume: sound.volume });
+      return null;
+    }
+
+    case 'stage.hand': {
+      const g = calls.get(busy.get(userId));
+      if (!g?.stage || g.participants.get(userId) !== tokenHash) return null;
+      if (msg.raised) g.hands.add(userId); else g.hands.delete(userId);
+      broadcastVoice(g.channelId);
+      return null;
+    }
+
+    case 'stage.speaker': {
+      // Moderators bring people up to speak or move them back to the audience; anyone can step down.
+      const g = calls.get(busy.get(userId));
+      if (!g?.stage) return null;
+      const target = Number(msg.userId);
+      if (!g.participants.has(target)) return null;
+      const mod = isStageMod(g, userId);
+      if (!mod && !(target === userId && !msg.speaker)) throw new HttpError(403, 'Only moderators can do that');
+      if (msg.speaker) { g.speakers.add(target); g.hands.delete(target); } else g.speakers.delete(target);
+      broadcastVoice(g.channelId);
+      return null;
+    }
+
     case 'voice.update': {
       // Muted / deafened / camera, shown next to your name in the channel list.
       const g = calls.get(busy.get(userId));
@@ -257,11 +294,27 @@ export function onSessionGone(userId, tokenHash) {
 // A voice channel is a group call that's always there: people drop in and out, nobody rings.
 // Same mesh and signalling as group calls, so the apps reuse their call code.
 
-/** Who's in a voice channel right now, with their mute/deafen state. */
+const soundRate = new Map(); // userId -> last time they played a sound
+
+/** Sends a sound to everyone in a voice room; each app plays it locally. */
+function playInRoom(g, fromUserId, sound) {
+  for (const [u, tok] of g.participants) sendToSession(u, tok, { type: 'voice.sound', channelId: g.channelId, userId: fromUserId, sound });
+}
+
+const isStageMod = (g, userId) => {
+  const ch = q('SELECT server_id FROM channels WHERE id = ?').get(g.channelId);
+  const owner = ch && q('SELECT owner_id FROM servers WHERE id = ?').get(ch.server_id)?.owner_id === userId;
+  return owner || has(channelPermissions(g.channelId, userId), P.MUTE_MEMBERS);
+};
+
+/** Who's in a voice channel right now, with their mute/deafen state (and on a stage, who's speaking). */
 export function voiceMembers(channelId) {
   const g = calls.get(voiceRooms.get(channelId));
   if (!g) return [];
-  return [...g.participants.keys()].map((id) => ({ id, ...(g.flags.get(id) || { muted: false, deafened: false, video: false, screen: false }) }));
+  return [...g.participants.keys()].map((id) => ({
+    id, ...(g.flags.get(id) || { muted: false, deafened: false, video: false, screen: false }),
+    ...(g.stage ? { speaker: g.speakers.has(id), hand: g.hands.has(id) } : {}),
+  }));
 }
 
 /** Tell everyone in the server who can see the channel who's in it now. */
@@ -308,17 +361,31 @@ function joinVoice(userId, tokenHash, channelId) {
       flags: new Map(),
       everJoined: new Set(),
       ringing: new Set(),
+      // Stage channels: speakers talk, everyone else listens (and can raise a hand).
+      stage: !!ch.is_stage,
+      speakers: new Set(),
+      hands: new Set(),
     };
     calls.set(g.id, g);
     voiceRooms.set(channelId, g.id);
   }
+  const fresh = !g.participants.has(userId);
   const limit = Math.min(MAX_GROUP, ch.voice_limit || MAX_GROUP);
   if (!g.participants.has(userId) && g.participants.size >= limit) {
     throw bad(ch.voice_limit && ch.voice_limit < MAX_GROUP ? `This channel is full (${limit} max)` : `Voice channels hold up to ${MAX_GROUP} people for now`);
   }
+  // On a stage, moderators start as speakers; everyone else joins the audience.
+  if (g.stage && fresh && isStageMod(g, userId)) g.speakers.add(userId);
   const reply = joinGroup(g, userId, tokenHash);
   reply.groupName = name;
+  reply.bitrate = ch.bitrate || 64;
+  reply.stage = g.stage;
   broadcastVoice(channelId);
+  // Your join sound, if you've picked one.
+  if (fresh) {
+    const u = q('SELECT join_sound FROM users WHERE id = ?').get(userId);
+    if (u?.join_sound) playInRoom(g, userId, { id: 0, name: 'join', emoji: '👋', media: u.join_sound, volume: 0.8 });
+  }
   return reply;
 }
 
@@ -474,6 +541,10 @@ function leaveGroup(g, userId) {
   for (const [u, tok] of g.participants) sendToSession(u, tok, { type: 'call.participant.left', callId: g.id, userId, call: groupOut(g) });
   if (g.voice) {
     g.flags.delete(userId);
+    g.speakers?.delete(userId);
+    g.hands?.delete(userId);
+    const u = q('SELECT leave_sound FROM users WHERE id = ?').get(userId);
+    if (u?.leave_sound && g.participants.size) playInRoom(g, userId, { id: 0, name: 'leave', emoji: '👋', media: u.leave_sound, volume: 0.8 });
     // Voice channels are rooms you drop in and out of: sitting in one alone is fine.
     if (g.participants.size === 0) finishGroup(g, 'empty');
     else broadcastVoice(g.channelId);

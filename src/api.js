@@ -77,6 +77,8 @@ export function userOut(row, viewerId = null) {
 function meOut(row) {
   return {
     ...userOut(row, row.id),
+    joinSound: row.join_sound || null,
+    leaveSound: row.leave_sound || null,
     friendCode: formatFriendCode(row.friend_code),
     createdAt: row.created_at,
     isAdmin: !!row.is_admin,
@@ -249,6 +251,8 @@ function canSeeMedia(m, userId) {
     !!q('SELECT 1 FROM server_members WHERE avatar_media = ? OR banner_media = ?').get(m.id, m.id) ||
     !!q('SELECT 1 FROM user_emojis WHERE media_id = ?').get(m.id) ||
     !!q('SELECT 1 FROM server_emojis WHERE media_id = ?').get(m.id) ||
+    !!q('SELECT 1 FROM server_sounds WHERE media_id = ?').get(m.id) ||
+    !!q('SELECT 1 FROM users WHERE join_sound = ? OR leave_sound = ?').get(m.id, m.id) ||
     !!q(`SELECT 1 FROM conversations c JOIN members mb ON mb.conversation_id = c.id WHERE c.avatar_media = ? AND mb.user_id = ?`).get(m.id, userId) ||
     !!q(`SELECT 1 FROM messages msg JOIN members mb ON mb.conversation_id = msg.conversation_id WHERE msg.media_id = ? AND mb.user_id = ?`).get(m.id, userId) ||
     !!q(`SELECT 1 FROM messages msg JOIN members mb ON mb.conversation_id = msg.conversation_id WHERE msg.meta LIKE ? AND mb.user_id = ?`).get(`%${m.id}%`, userId)
@@ -303,6 +307,8 @@ export function deleteMediaIfUnused(id) {
     q('SELECT 1 FROM channel_attachments WHERE media_id = ? LIMIT 1').get(id) ||
     q('SELECT 1 FROM user_emojis WHERE media_id = ? LIMIT 1').get(id) ||
     q('SELECT 1 FROM server_emojis WHERE media_id = ? LIMIT 1').get(id) ||
+    q('SELECT 1 FROM server_sounds WHERE media_id = ? LIMIT 1').get(id) ||
+    q('SELECT 1 FROM users WHERE join_sound = ? OR leave_sound = ? LIMIT 1').get(id, id) ||
     q('SELECT 1 FROM webhooks WHERE avatar_media = ? LIMIT 1').get(id) ||
     q('SELECT 1 FROM channel_messages WHERE meta LIKE ? LIMIT 1').get(`%${id}%`) ||
     q('SELECT 1 FROM servers WHERE icon_media = ? OR banner_media = ? LIMIT 1').get(id, id);
@@ -649,6 +655,18 @@ route('PATCH', '/api/me', ({ user, body }) => {
       colours: Array.isArray(ns.colours) ? ns.colours.slice(0, 2).map(colour) : [],
     } : null;
     q('UPDATE users SET name_style = ? WHERE id = ?').run(out && (out.font !== 'default' || out.colours.length) ? JSON.stringify(out) : null, user.id);
+  }
+  // Join / leave sounds for voice channels: short audio you've uploaded.
+  for (const [key, col] of [['joinSound', 'join_sound'], ['leaveSound', 'leave_sound']]) {
+    if (body[key] === undefined) continue;
+    let v = null;
+    if (body[key]) {
+      const m = requireMedia(body[key], user.id);
+      if (!m.mime.startsWith('audio/')) throw bad('That needs to be a sound');
+      if (m.size > 1024 * 1024) throw bad('Keep sounds under 1 MB');
+      v = m.id;
+    }
+    q(`UPDATE users SET ${col} = ? WHERE id = ?`).run(v, user.id);
   }
   const oldMedia = [user.avatar_media, user.banner_media];
   q(`UPDATE users SET display_name = ?, about = ?, avatar_media = ?, banner_media = ?, accent_colour = ?,

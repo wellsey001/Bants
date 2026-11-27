@@ -19,7 +19,7 @@ const forbidden = (msg = 'You don’t have permission to do that') => new HttpEr
 
 const MAX_SERVERS_OWNED = Number(process.env.MAX_SERVERS_PER_USER || 25);
 const MAX_BODY = 4000;
-const CHANNEL_TYPES = ['text', 'voice', 'announcement', 'category', 'forum'];
+const CHANNEL_TYPES = ['text', 'voice', 'announcement', 'category', 'forum', 'stage'];
 const INVITE_ALPHABET = 'abcdefghjkmnpqrstuvwxyzABCDEFGHJKMNPQRSTUVWXYZ23456789';
 
 function str(v, max, field) {
@@ -127,6 +127,8 @@ function channelOut(c, viewerId, perms = channelPermissions(c.id, viewerId)) {
   if (c.type === 'voice') {
     out.userLimit = c.voice_limit;
     out.voiceMembers = voiceMembers(c.id);
+    out.bitrate = c.bitrate || 64; // kbps for voices in here
+    out.stage = !!c.is_stage;
   }
   if (c.type === 'thread') {
     Object.assign(out, { ownerId: c.owner_id, archived: !!c.archived, locked: !!c.locked, starterMessageId: c.starter_message_id });
@@ -844,8 +846,9 @@ route('POST', '/api/servers/:id/channels', ({ user, params, body }) => {
   const position = int(body.position, 'position') ??
     q('SELECT COALESCE(MAX(position), -1) + 1 AS p FROM channels WHERE server_id = ? AND parent_id IS ? AND type != ?').get(s.id, parentId, 'thread').p;
   // Forums are text channels where every post is its own thread.
-  const id = Number(q('INSERT INTO channels (server_id, type, name, parent_id, topic, position, created_at, is_forum) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
-    .run(s.id, type === 'forum' ? 'text' : type, name, parentId, str(body.topic, 1024, 'topic') || '', position, Date.now(), type === 'forum' ? 1 : 0).lastInsertRowid);
+  // Stages are voice channels where only invited speakers talk.
+  const id = Number(q('INSERT INTO channels (server_id, type, name, parent_id, topic, position, created_at, is_forum, is_stage) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)')
+    .run(s.id, type === 'forum' ? 'text' : type === 'stage' ? 'voice' : type, name, parentId, str(body.topic, 1024, 'topic') || '', position, Date.now(), type === 'forum' ? 1 : 0, type === 'stage' ? 1 : 0).lastInsertRowid);
   // A private channel: hidden from @everyone, visible to the roles listed.
   if (body.private) {
     const everyone = q('SELECT id FROM roles WHERE server_id = ? AND is_default = 1').get(s.id).id;
@@ -888,6 +891,7 @@ route('PATCH', '/api/channels/:id', ({ user, params, body }) => {
   if (body.slowmode !== undefined) changes.slowmode_s = Math.max(0, Math.min(21600, int(body.slowmode, 'slowmode')));
   if (body.nsfw !== undefined) changes.nsfw = body.nsfw ? 1 : 0;
   if (body.userLimit !== undefined && c.type === 'voice') changes.voice_limit = Math.max(0, Math.min(99, int(body.userLimit, 'userLimit')));
+  if (body.bitrate !== undefined && c.type === 'voice') changes.bitrate = [32, 64, 96, 128, 256].includes(Number(body.bitrate)) ? Number(body.bitrate) : 64;
   if (body.syncPerms !== undefined) changes.sync_perms = body.syncPerms ? 1 : 0;
   const keys = Object.keys(changes);
   if (keys.length) {

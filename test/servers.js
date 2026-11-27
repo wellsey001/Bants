@@ -499,6 +499,49 @@ try {
     assert.equal(st.attachments[0].id, up.id);
   });
 
+  await step('soundboard, join sounds, voice quality and stage channels', async () => {
+    const sid = server.id;
+    const ogg = Buffer.alloc(2000, 1);
+    const up = (await api('POST', '/api/media', { token: owner.token, raw: ogg, headers: { 'content-type': 'audio/ogg' } })).data;
+    const sound = (await api('POST', `/api/servers/${sid}/sounds`, { token: owner.token, body: { name: 'Air horn', emoji: '📯', media: up.id } })).data;
+    assert.equal(sound.name, 'Air horn');
+    assert.equal((await api('GET', `/api/servers/${sid}/sounds`, { token: dave.token })).data.length, 1);
+    assert.equal((await api('PUT', `/api/sounds/${sound.id}/favourite`, { token: dave.token, body: {} })).data.favourite, true);
+    assert.equal((await api('GET', '/api/me/sounds', { token: dave.token })).data.length, 1);
+    // A join sound for Dave
+    const js = (await api('POST', '/api/media', { token: dave.token, raw: ogg, headers: { 'content-type': 'audio/ogg' } })).data;
+    assert.equal((await api('PATCH', '/api/me', { token: dave.token, body: { joinSound: js.id } })).data.joinSound, js.id);
+    // Stage channel at 128 kbps
+    const stage = (await api('POST', `/api/servers/${sid}/channels`, { token: owner.token, body: { name: 'Town hall', type: 'stage' } })).data;
+    assert.equal(stage.type, 'voice');
+    assert.equal(stage.stage, true);
+    await api('PATCH', `/api/channels/${stage.id}`, { token: owner.token, body: { bitrate: 128 } });
+    ownerWs.json({ type: 'voice.join', channelId: stage.id });
+    const oj = await ownerWs.waitFor((e) => e.type === 'call.joined' && e.call.voice);
+    assert.equal(oj.bitrate, 128);
+    assert.equal(oj.stage, true);
+    daveWs.json({ type: 'voice.join', channelId: stage.id });
+    await daveWs.waitFor((e) => e.type === 'call.joined');
+    const jsound = await ownerWs.waitFor((e) => e.type === 'voice.sound' && e.userId === dave.user.id);
+    assert.equal(jsound.sound.media, js.id);
+    let st = await ownerWs.waitFor((e) => e.type === 'voice.state' && e.channelId === stage.id && e.members.length === 2);
+    assert.equal(st.members.find((m) => m.id === owner.user.id).speaker, true, 'owner speaks');
+    assert.equal(st.members.find((m) => m.id === dave.user.id).speaker, false, 'dave listens');
+    // Audience can't use the soundboard; hands up; mod brings them up
+    daveWs.json({ type: 'voice.sound', soundId: sound.id });
+    assert.match((await daveWs.waitFor((e) => e.type === 'error')).error, /speakers/);
+    daveWs.json({ type: 'stage.hand', raised: true });
+    await ownerWs.waitFor((e) => e.type === 'voice.state' && e.members.some((m) => m.id === dave.user.id && m.hand));
+    ownerWs.json({ type: 'stage.speaker', userId: dave.user.id, speaker: true });
+    await ownerWs.waitFor((e) => e.type === 'voice.state' && e.members.some((m) => m.id === dave.user.id && m.speaker && !m.hand));
+    daveWs.json({ type: 'voice.sound', soundId: sound.id });
+    const played = await ownerWs.waitFor((e) => e.type === 'voice.sound' && e.sound.id === sound.id);
+    assert.equal(played.userId, dave.user.id);
+    ownerWs.json({ type: 'call.end', callId: oj.call.id });
+    daveWs.json({ type: 'call.end', callId: oj.call.id });
+    await ownerWs.waitFor((e) => e.type === 'voice.state' && e.channelId === stage.id && e.members.length === 0);
+  });
+
   await step('leaving, and the owner can’t leave without handing over', async () => {
     assert.equal((await api('POST', `/api/servers/${server.id}/leave`, { token: owner.token })).status, 400);
     assert.equal((await api('POST', `/api/servers/${server.id}/leave`, { token: dave.token })).status, 200);

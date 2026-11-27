@@ -496,6 +496,25 @@ for (const col of ['theme_colours', 'decoration', 'profile_effect', 'name_style'
 // Super reactions: the big ones that burst.
 if (!hasColumn('reactions', 'burst')) db.exec('ALTER TABLE reactions ADD COLUMN burst INTEGER NOT NULL DEFAULT 0');
 if (!hasColumn('channel_reactions', 'burst')) db.exec('ALTER TABLE channel_reactions ADD COLUMN burst INTEGER NOT NULL DEFAULT 0');
+// ── Voice extras: soundboard, join/leave sounds, voice quality, stage channels ──
+db.exec(`CREATE TABLE IF NOT EXISTS server_sounds (
+  id INTEGER PRIMARY KEY,
+  server_id INTEGER NOT NULL REFERENCES servers(id) ON DELETE CASCADE,
+  name TEXT NOT NULL,
+  emoji TEXT NOT NULL DEFAULT '🔊',
+  media_id TEXT NOT NULL,
+  volume REAL NOT NULL DEFAULT 1,
+  created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS sound_favourites (
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  sound_id INTEGER NOT NULL REFERENCES server_sounds(id) ON DELETE CASCADE,
+  PRIMARY KEY (user_id, sound_id)
+);`);
+for (const col of ['join_sound', 'leave_sound']) if (!hasColumn('users', col)) db.exec(`ALTER TABLE users ADD COLUMN ${col} TEXT`);
+if (!hasColumn('channels', 'bitrate')) db.exec('ALTER TABLE channels ADD COLUMN bitrate INTEGER NOT NULL DEFAULT 64');
+if (!hasColumn('channels', 'is_stage')) db.exec('ALTER TABLE channels ADD COLUMN is_stage INTEGER NOT NULL DEFAULT 0');
 // Server emoji ids start high so they never clash with personal ones in <:name:id>.
 if (!db.prepare('SELECT 1 FROM sqlite_sequence WHERE name = ?').get('server_emojis')) db.prepare("INSERT INTO sqlite_sequence (name, seq) VALUES ('server_emojis', 1000000000)").run();
 
