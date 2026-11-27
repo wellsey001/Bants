@@ -225,6 +225,7 @@ function canSeeMedia(m, userId) {
     !!q('SELECT 1 FROM stickers WHERE media_id = ? AND user_id = ?').get(m.id, userId) ||
     !!q('SELECT 1 FROM users WHERE avatar_media = ? OR banner_media = ?').get(m.id, m.id) ||
     !!q('SELECT 1 FROM server_members WHERE avatar_media = ? OR banner_media = ?').get(m.id, m.id) ||
+    !!q('SELECT 1 FROM user_emojis WHERE media_id = ?').get(m.id) ||
     !!q(`SELECT 1 FROM conversations c JOIN members mb ON mb.conversation_id = c.id WHERE c.avatar_media = ? AND mb.user_id = ?`).get(m.id, userId) ||
     !!q(`SELECT 1 FROM messages msg JOIN members mb ON mb.conversation_id = msg.conversation_id WHERE msg.media_id = ? AND mb.user_id = ?`).get(m.id, userId) ||
     !!q(`SELECT 1 FROM messages msg JOIN members mb ON mb.conversation_id = msg.conversation_id WHERE msg.meta LIKE ? AND mb.user_id = ?`).get(`%${m.id}%`, userId)
@@ -277,6 +278,7 @@ export function deleteMediaIfUnused(id) {
     q('SELECT 1 FROM server_members WHERE avatar_media = ? OR banner_media = ? LIMIT 1').get(id, id) ||
     q('SELECT 1 FROM conversations WHERE avatar_media = ? LIMIT 1').get(id) ||
     q('SELECT 1 FROM channel_attachments WHERE media_id = ? LIMIT 1').get(id) ||
+    q('SELECT 1 FROM user_emojis WHERE media_id = ? LIMIT 1').get(id) ||
     q('SELECT 1 FROM servers WHERE icon_media = ? OR banner_media = ? LIMIT 1').get(id, id);
   if (used) return;
   q('DELETE FROM media WHERE id = ?').run(id);

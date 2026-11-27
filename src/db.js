@@ -418,6 +418,16 @@ if (!hasColumn('server_members', 'avatar_media')) db.exec('ALTER TABLE server_me
 if (!hasColumn('server_members', 'banner_media')) db.exec('ALTER TABLE server_members ADD COLUMN banner_media TEXT');
 if (!hasColumn('server_members', 'bio')) db.exec("ALTER TABLE server_members ADD COLUMN bio TEXT NOT NULL DEFAULT ''");
 if (!hasColumn('server_members', 'pronouns')) db.exec("ALTER TABLE server_members ADD COLUMN pronouns TEXT NOT NULL DEFAULT ''");
+// Custom emojis: up to 50 per person, static or animated, usable in any server.
+db.exec(`CREATE TABLE IF NOT EXISTS user_emojis (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  name TEXT NOT NULL,
+  media_id TEXT NOT NULL,
+  animated INTEGER NOT NULL DEFAULT 0,
+  created_at INTEGER NOT NULL,
+  UNIQUE (user_id, name)
+)`);
 
 // The first account on the server runs it.
 if (!db.prepare('SELECT 1 FROM users WHERE is_admin = 1').get()) {

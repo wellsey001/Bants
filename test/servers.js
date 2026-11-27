@@ -334,6 +334,59 @@ try {
     assert.equal((await api('GET', `/api/servers/${server.id}/search?q=secret`, { token: mod.token })).data.length, 1);
   });
 
+  await step('custom emojis: upload, use, react, limits and deleting', async () => {
+    const png = Buffer.alloc(800, 7);
+    const gif = Buffer.concat([Buffer.from('GIF89a'), Buffer.alloc(500, 1)]);
+    const upPng = (await api('POST', '/api/media', { token: dave.token, raw: png, headers: { 'content-type': 'image/png' } })).data;
+    const upGif = (await api('POST', '/api/media', { token: dave.token, raw: gif, headers: { 'content-type': 'image/gif' } })).data;
+    const pepe = await api('POST', '/api/emojis', { token: dave.token, body: { name: 'pepe', media: upPng.id } });
+    assert.equal(pepe.status, 200);
+    assert.equal(pepe.data.animated, false);
+    const dance = (await api('POST', '/api/emojis', { token: dave.token, body: { name: 'dance', media: upGif.id } })).data;
+    assert.equal(dance.animated, true);
+    assert.equal((await api('POST', '/api/emojis', { token: dave.token, body: { name: 'PEPE', media: upPng.id } })).status, 400, 'names are unique');
+    assert.equal((await api('POST', '/api/emojis', { token: owner.token, body: { name: 'stolen', media: upPng.id } })).status, 400, 'only your own uploads');
+    const mine = (await api('GET', '/api/emojis', { token: dave.token })).data;
+    assert.equal(mine.emojis.length, 2);
+    assert.equal(mine.max, 50);
+
+    // In a message: your own go through, someone else's turn into :name:
+    const tok = `<:pepe:${pepe.data.id}>`;
+    const sent = (await api('POST', `/api/channels/${general.id}/messages`, { token: dave.token, body: { body: `hey ${tok} <a:dance:${dance.id}>` } })).data;
+    assert.equal(sent.body, `hey ${tok} <a:dance:${dance.id}>`);
+    assert.equal(sent.emojis.length, 2);
+    const owners = (await api('POST', `/api/channels/${general.id}/messages`, { token: owner.token, body: { body: `copying ${tok}` } })).data;
+    assert.equal(owners.body, 'copying :pepe:');
+    // Everyone can see the picture
+    assert.equal((await api('GET', `/api/media/${upPng.id}`, { token: owner.token })).status, 200);
+
+    // Reactions: the owner starts it, others can pile on, but can't start one with someone else's
+    assert.equal((await api('PUT', `/api/channel-messages/${owners.id}/reactions/${encodeURIComponent(tok)}`, { token: owner.token })).status, 400);
+    assert.equal((await api('PUT', `/api/channel-messages/${owners.id}/reactions/${encodeURIComponent(tok)}`, { token: dave.token })).status, 200);
+    assert.equal((await api('PUT', `/api/channel-messages/${owners.id}/reactions/${encodeURIComponent(tok)}`, { token: owner.token })).status, 200);
+    const page = (await api('GET', `/api/channels/${general.id}/messages`, { token: owner.token })).data;
+    const list = Array.isArray(page) ? page : page.messages;
+    const reacted = list.find((m) => m.id === owners.id);
+    assert.equal(reacted.reactions[0].userIds.length, 2);
+    assert.equal(reacted.emojis[0].name, 'pepe');
+
+    // Deleting removes it from the list (messages fall back to :name: on the apps)
+    assert.equal((await api('DELETE', `/api/emojis/${dance.id}`, { token: dave.token })).status, 200);
+    assert.equal((await api('GET', '/api/emojis', { token: dave.token })).data.emojis.length, 1);
+
+    // The 50 limit
+    for (let i = 0; i < 49; i++) {
+      const u = (await api('POST', '/api/media', { token: dave.token, raw: png, headers: { 'content-type': 'image/png' } })).data;
+      assert.equal((await api('POST', '/api/emojis', { token: dave.token, body: { name: `e${i}`, media: u.id } })).status, 200);
+    }
+    const over = (await api('POST', '/api/media', { token: dave.token, raw: png, headers: { 'content-type': 'image/png' } })).data;
+    assert.equal((await api('POST', '/api/emojis', { token: dave.token, body: { name: 'onemore', media: over.id } })).status, 400);
+  });
+
+  await step('GIFs in channels say when they are switched off', async () => {
+    assert.equal((await api('POST', `/api/channels/${general.id}/gif`, { token: dave.token, body: { url: 'https://media.giphy.com/x.gif' } })).status, 503);
+  });
+
   await step('leaving, and the owner can’t leave without handing over', async () => {
     assert.equal((await api('POST', `/api/servers/${server.id}/leave`, { token: owner.token })).status, 400);
     assert.equal((await api('POST', `/api/servers/${server.id}/leave`, { token: dave.token })).status, 200);

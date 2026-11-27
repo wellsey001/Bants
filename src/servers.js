@@ -2,9 +2,11 @@
 // Chats (conversations) are untouched. The app switches between the two with one button.
 import crypto from 'node:crypto';
 import { q, tx } from './db.js';
-import { route, HttpError, getUser, mediaAccessChecks, requireImage, deleteMediaIfUnused, areContacts, isBlocked, sharedServerUsers } from './api.js';
+import { route, HttpError, getUser, mediaAccessChecks, requireImage, deleteMediaIfUnused, saveMediaBuffer, areContacts, isBlocked, sharedServerUsers } from './api.js';
 import { sendToUser, isOnline } from './hub.js';
 import { voiceMembers, leaveVoiceIn, recheckVoice } from './calls.js';
+import { emojiIdsIn, emojisById, cleanEmojiTokens, customReaction } from './emojis.js';
+import { gifsEnabled, downloadGif } from './gifs.js';
 import {
   P, ALL, DEFAULT_EVERYONE, has, serverPermissions, channelPermissions, topRolePosition, outranks, canManageRole,
 } from './permissions.js';
@@ -204,6 +206,8 @@ function messageOut(m) {
     pinned: !!m.pinned_at, mentionsEveryone: !!m.mentions_everyone,
     reactions: [...reactions].map(([emoji, userIds]) => ({ emoji, userIds })),
     attachments, meta,
+    // Custom emojis used in the text or as reactions, so anyone can draw them.
+    emojis: m.deleted ? [] : emojisById(emojiIdsIn(m.body, ...reactions.keys())),
   };
 }
 
@@ -261,7 +265,7 @@ function postSystem(channelId, kind, authorId, meta = null) {
   return id;
 }
 
-export function sendChannelMessage(userId, channelId, input) {
+export function sendChannelMessage(userId, channelId, input, { viaGifPicker = false } = {}) {
   const { channel, perms } = requireChannel(channelId, userId);
   if (channel.type === 'category') throw bad('You can’t post in a category');
   if (!has(perms, P.SEND_MESSAGES)) {
@@ -274,11 +278,12 @@ export function sendChannelMessage(userId, channelId, input) {
     const dupe = q('SELECT * FROM channel_messages WHERE author_id = ? AND client_id = ?').get(userId, clientId);
     if (dupe) return messageOut(dupe);
   }
-  const body = typeof input.body === 'string' ? input.body.trim() : '';
+  const body = cleanEmojiTokens(typeof input.body === 'string' ? input.body.trim() : '', userId);
   if (body.length > MAX_BODY) throw bad(`Message is too long (max ${MAX_BODY})`);
   const attachmentIds = Array.isArray(input.attachments) ? input.attachments.slice(0, 10).map(String) : [];
   if (!body && !attachmentIds.length) throw bad('Message is empty');
-  if (attachmentIds.length && !has(perms, P.ATTACH_FILES)) throw forbidden('You can’t attach files here');
+  // A GIF from the picker counts as a link, not an upload, so it doesn't need Attach files.
+  if (attachmentIds.length && !has(perms, P.ATTACH_FILES) && !viaGifPicker) throw forbidden('You can’t attach files here');
   for (const id of attachmentIds) {
     const m = q('SELECT uploader_id FROM media WHERE id = ?').get(id);
     if (!m || m.uploader_id !== userId) throw bad('Unknown attachment');
@@ -918,6 +923,32 @@ route('GET', '/api/channels/:id/messages', ({ user, params, query }) => {
 
 route('POST', '/api/channels/:id/messages', ({ user, params, body }) => sendChannelMessage(user.id, Number(params.id), body));
 
+/** Send a GIF from the picker, with an optional message and reply. */
+route('POST', '/api/channels/:id/gif', async ({ user, params, body }) => {
+  if (!gifsEnabled()) throw new HttpError(503, 'GIFs aren’t set up on this server yet', 'gifs_off');
+  const channelId = Number(params.id);
+  const { perms } = requireChannel(channelId, user.id);
+  if (!has(perms, P.SEND_MESSAGES)) throw forbidden('You can’t send messages here');
+  const clientId = body.clientId ? String(body.clientId).slice(0, 64) : null;
+  if (clientId) {
+    const dupe = q('SELECT * FROM channel_messages WHERE author_id = ? AND client_id = ?').get(user.id, clientId);
+    if (dupe) return messageOut(dupe);
+  }
+  let gif;
+  try {
+    gif = await downloadGif(String(body.url || ''));
+  } catch {
+    throw bad('Couldn’t get that GIF');
+  }
+  const mediaId = saveMediaBuffer(gif.body, gif.mime, 'gif.gif', user.id);
+  try {
+    return sendChannelMessage(user.id, channelId, { body: body.body, replyTo: body.replyTo, clientId, attachments: [mediaId] }, { viaGifPicker: true });
+  } catch (e) {
+    deleteMediaIfUnused(mediaId);
+    throw e;
+  }
+});
+
 route('GET', '/api/channels/:id/pins', ({ user, params }) => {
   const { channel: c, perms } = requireChannel(Number(params.id), user.id);
   if (!has(perms, P.READ_HISTORY)) return [];
@@ -948,7 +979,7 @@ function requireMessage(messageId, userId) {
 route('PATCH', '/api/channel-messages/:id', ({ user, params, body }) => {
   const { m, channel } = requireMessage(Number(params.id), user.id);
   if (m.author_id !== user.id || m.deleted || m.kind !== 'default') throw forbidden('You can only edit your own messages');
-  const text = typeof body.body === 'string' ? body.body.trim() : '';
+  const text = cleanEmojiTokens(typeof body.body === 'string' ? body.body.trim() : '', user.id);
   if (!text && !q('SELECT 1 FROM channel_attachments WHERE message_id = ?').get(m.id)) throw bad('Message is empty');
   if (text.length > MAX_BODY) throw bad(`Message is too long (max ${MAX_BODY})`);
   q('UPDATE channel_messages SET body = ?, edited_at = ? WHERE id = ?').run(text, Date.now(), m.id);
@@ -974,11 +1005,14 @@ route('PUT', '/api/channel-messages/:id/reactions/:emoji', ({ user, params }) =>
   if (m.deleted) throw bad('Message was deleted');
   const emoji = String(params.emoji).slice(0, 64);
   const exists = q('SELECT 1 FROM channel_reactions WHERE message_id = ? AND emoji = ?').get(m.id, emoji);
+  // Custom emojis: anyone can join one that's already there, but only the owner can start it.
+  const custom = customReaction(emoji);
+  if (custom && !exists && (custom.missing || custom.user_id !== user.id)) throw bad('You can only react with your own custom emojis');
   // Anyone who can see a message can pile onto an existing reaction; starting a new one needs ADD_REACTIONS.
   if (!exists && !has(perms, P.ADD_REACTIONS)) throw forbidden();
   if (q('SELECT COUNT(DISTINCT emoji) AS n FROM channel_reactions WHERE message_id = ?').get(m.id).n >= 20 && !exists) throw bad('That message has enough reactions');
   q('INSERT OR IGNORE INTO channel_reactions (message_id, user_id, emoji, created_at) VALUES (?, ?, ?, ?)').run(m.id, user.id, emoji, Date.now());
-  sendToChannel(channel.id, { type: 'channel.reaction', channelId: channel.id, messageId: m.id, userId: user.id, emoji, added: true });
+  sendToChannel(channel.id, { type: 'channel.reaction', channelId: channel.id, messageId: m.id, userId: user.id, emoji, added: true, emojis: emojisById(emojiIdsIn(emoji)) });
   return { ok: true };
 });
 
