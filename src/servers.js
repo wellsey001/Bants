@@ -2,6 +2,7 @@
 // Chats (conversations) are untouched. The app switches between the two with one button.
 import crypto from 'node:crypto';
 import { q, tx } from './db.js';
+import { flairOut } from './api.js';
 import { route, HttpError, getUser, mediaAccessChecks, requireImage, deleteMediaIfUnused, saveMediaBuffer, areContacts, isBlocked, sharedServerUsers } from './api.js';
 import { sendToUser, isOnline } from './hub.js';
 import { pushToUser } from './push.js';
@@ -144,6 +145,7 @@ function profileUser(row) {
     id: row.id, username: row.username, displayName: row.display_name, avatar: row.avatar_media, about: row.about,
     banner: row.banner_media ?? null, accentColour: row.accent_colour ?? null, pronouns: row.pronouns || '',
     customStatus: row.custom_status || '', statusEmoji: row.status_emoji || '',
+    ...flairOut(row),
   };
 }
 
@@ -199,10 +201,12 @@ function messageOut(m) {
   const sm = author && ch ? q('SELECT nickname, avatar_media FROM server_members WHERE server_id = ? AND user_id = ?').get(ch.server_id, author.id) : null;
   const nickname = sm?.nickname;
   const reactions = new Map();
+  const bursts = new Map();
   if (!m.deleted) {
-    for (const r of q('SELECT emoji, user_id FROM channel_reactions WHERE message_id = ? ORDER BY created_at').all(m.id)) {
-      if (!reactions.has(r.emoji)) reactions.set(r.emoji, []);
+    for (const r of q('SELECT emoji, user_id, burst FROM channel_reactions WHERE message_id = ? ORDER BY created_at').all(m.id)) {
+      if (!reactions.has(r.emoji)) { reactions.set(r.emoji, []); bursts.set(r.emoji, []); }
       reactions.get(r.emoji).push(r.user_id);
+      if (r.burst) bursts.get(r.emoji).push(r.user_id);
     }
   }
   const attachments = m.deleted ? [] : q(
@@ -222,11 +226,14 @@ function messageOut(m) {
     // Polls are stored as ordinary messages (with the poll in meta) but shown as their own kind.
     kind: meta?.poll ? 'poll' : meta?.event && m.kind === 'system' ? 'event' : m.kind,
     // Server avatar wins over the main one, like Discord.
-    author: hook || (author ? { id: author.id, username: author.username, displayName: author.display_name, avatar: sm?.avatar_media || author.avatar_media, nickname: nickname ?? null } : null),
+    author: hook || (author ? {
+      id: author.id, username: author.username, displayName: author.display_name, avatar: sm?.avatar_media || author.avatar_media, nickname: nickname ?? null,
+      decoration: author.decoration || null, nameStyle: flairOut(author).nameStyle,
+    } : null),
     body: m.deleted ? '' : m.body,
     replyTo: m.reply_to, createdAt: m.created_at, editedAt: m.edited_at, deleted: !!m.deleted,
     pinned: !!m.pinned_at, mentionsEveryone: !!m.mentions_everyone,
-    reactions: [...reactions].map(([emoji, userIds]) => ({ emoji, userIds })),
+    reactions: [...reactions].map(([emoji, userIds]) => ({ emoji, userIds, superIds: bursts.get(emoji) })),
     attachments, meta, poll,
     // Custom emojis used in the text or as reactions, so anyone can draw them.
     emojis: m.deleted ? [] : emojisById(emojiIdsIn(m.body, ...reactions.keys())),
@@ -1009,6 +1016,22 @@ route('GET', '/api/channels/:id/messages', ({ user, params, query }) => {
 
 route('POST', '/api/channels/:id/messages', ({ user, params, body }) => sendChannelMessage(user.id, Number(params.id), body));
 
+/** Send one of your stickers into a channel. */
+route('POST', '/api/channels/:id/sticker', ({ user, params, body }) => {
+  const { channel, perms } = requireChannel(Number(params.id), user.id);
+  if (channel.type === 'category' || channel.is_forum) throw bad('Stickers go in a text channel');
+  requireRulesAccepted(channel.server_id, user.id);
+  if (!has(perms, P.SEND_MESSAGES)) throw forbidden('You can’t send messages here');
+  const st = q('SELECT media_id FROM stickers WHERE user_id = ? AND media_id = ?').get(user.id, String(body.media || ''));
+  if (!st) throw bad('That isn’t one of your stickers');
+  const id = tx(() => {
+    const id = storeMessage(channel.id, user.id, '', { meta: { sticker: true }, replyTo: body.replyTo ? Number(body.replyTo) : null });
+    q('INSERT INTO channel_attachments (message_id, media_id, position, spoiler) VALUES (?, ?, 0, 0)').run(id, st.media_id);
+    return id;
+  });
+  return deliverMessage(channel, id);
+});
+
 /** Send a GIF from the picker, with an optional message and reply. */
 route('POST', '/api/channels/:id/gif', async ({ user, params, body }) => {
   if (!gifsEnabled()) throw new HttpError(503, 'GIFs aren’t set up on this server yet', 'gifs_off');
@@ -1086,7 +1109,7 @@ route('DELETE', '/api/channel-messages/:id', ({ user, params }) => {
   return { ok: true };
 });
 
-route('PUT', '/api/channel-messages/:id/reactions/:emoji', ({ user, params }) => {
+route('PUT', '/api/channel-messages/:id/reactions/:emoji', ({ user, params, query }) => {
   const { m, channel, perms } = requireMessage(Number(params.id), user.id);
   if (m.deleted) throw bad('Message was deleted');
   const emoji = String(params.emoji).slice(0, 64);
@@ -1098,8 +1121,10 @@ route('PUT', '/api/channel-messages/:id/reactions/:emoji', ({ user, params }) =>
   // Anyone who can see a message can pile onto an existing reaction; starting a new one needs ADD_REACTIONS.
   if (!exists && !has(perms, P.ADD_REACTIONS)) throw forbidden();
   if (q('SELECT COUNT(DISTINCT emoji) AS n FROM channel_reactions WHERE message_id = ?').get(m.id).n >= 20 && !exists) throw bad('That message has enough reactions');
-  q('INSERT OR IGNORE INTO channel_reactions (message_id, user_id, emoji, created_at) VALUES (?, ?, ?, ?)').run(m.id, user.id, emoji, Date.now());
-  sendToChannel(channel.id, { type: 'channel.reaction', channelId: channel.id, messageId: m.id, userId: user.id, emoji, added: true, emojis: emojisById(emojiIdsIn(emoji)) });
+  const burst = query.super === '1' ? 1 : 0;
+  q('INSERT INTO channel_reactions (message_id, user_id, emoji, created_at, burst) VALUES (?, ?, ?, ?, ?) ON CONFLICT(message_id, user_id, emoji) DO UPDATE SET burst = MAX(burst, excluded.burst)')
+    .run(m.id, user.id, emoji, Date.now(), burst);
+  sendToChannel(channel.id, { type: 'channel.reaction', channelId: channel.id, messageId: m.id, userId: user.id, emoji, added: true, super: !!burst, emojis: emojisById(emojiIdsIn(emoji)) });
   return { ok: true };
 });
 

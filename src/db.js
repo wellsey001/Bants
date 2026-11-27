@@ -489,6 +489,13 @@ db.exec(`CREATE TABLE IF NOT EXISTS channel_notify (
   level TEXT NOT NULL CHECK (level IN ('all','mentions','none')),
   PRIMARY KEY (user_id, channel_id)
 )`);
+// Profile flair (Nitro-style, free for everyone): theme gradient, avatar decoration, profile effect, name style.
+for (const col of ['theme_colours', 'decoration', 'profile_effect', 'name_style']) {
+  if (!hasColumn('users', col)) db.exec(`ALTER TABLE users ADD COLUMN ${col} TEXT`);
+}
+// Super reactions: the big ones that burst.
+if (!hasColumn('reactions', 'burst')) db.exec('ALTER TABLE reactions ADD COLUMN burst INTEGER NOT NULL DEFAULT 0');
+if (!hasColumn('channel_reactions', 'burst')) db.exec('ALTER TABLE channel_reactions ADD COLUMN burst INTEGER NOT NULL DEFAULT 0');
 // Server emoji ids start high so they never clash with personal ones in <:name:id>.
 if (!db.prepare('SELECT 1 FROM sqlite_sequence WHERE name = ?').get('server_emojis')) db.prepare("INSERT INTO sqlite_sequence (name, seq) VALUES ('server_emojis', 1000000000)").run();
 

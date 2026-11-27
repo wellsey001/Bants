@@ -472,6 +472,33 @@ try {
     assert.equal((await api('POST', `/api/messages/${msg.id}/react`, { token: owner.token, body: { emoji: tok } })).status, 200, 'can join an existing one');
   });
 
+  await step('flair, super reactions and stickers in channels', async () => {
+    const me = await api('PATCH', '/api/me', { token: dave.token, body: { themeColours: [0xff4d8d, 0x5b4bff], decoration: 'fire', profileEffect: 'confetti', nameStyle: { font: 'script', colours: [0xffd23f, 0xff4d8d] } } });
+    assert.deepEqual(me.data.themeColours, [0xff4d8d, 0x5b4bff]);
+    assert.equal(me.data.decoration, 'fire');
+    assert.equal(me.data.nameStyle.font, 'script');
+    assert.equal((await api('PATCH', '/api/me', { token: dave.token, body: { decoration: 'nope' } })).data.decoration, null);
+    await api('PATCH', '/api/me', { token: dave.token, body: { decoration: 'neon' } });
+    const sent = (await api('POST', `/api/channels/${general.id}/messages`, { token: dave.token, body: { body: 'styled' } })).data;
+    assert.equal(sent.author.decoration, 'neon');
+    assert.equal(sent.author.nameStyle.font, 'script');
+    const profile = (await api('GET', `/api/servers/${server.id}/members/${dave.user.id}/profile`, { token: owner.token })).data;
+    assert.equal(profile.user.profileEffect, 'confetti');
+    // Super reaction
+    assert.equal((await api('PUT', `/api/channel-messages/${sent.id}/reactions/${encodeURIComponent('🔥')}?super=1`, { token: owner.token })).status, 200);
+    const page = (await api('GET', `/api/channels/${general.id}/messages`, { token: owner.token })).data;
+    const r = page.find((m) => m.id === sent.id).reactions[0];
+    assert.deepEqual(r.superIds, [owner.user.id]);
+    // Sticker: needs to be one of yours
+    const png = Buffer.alloc(900, 5);
+    const up = (await api('POST', '/api/media', { token: dave.token, raw: png, headers: { 'content-type': 'image/png' } })).data;
+    assert.equal((await api('POST', `/api/channels/${general.id}/sticker`, { token: dave.token, body: { media: up.id } })).status, 400);
+    assert.equal((await api('POST', '/api/stickers', { token: dave.token, body: { media: up.id } })).status, 200);
+    const st = (await api('POST', `/api/channels/${general.id}/sticker`, { token: dave.token, body: { media: up.id } })).data;
+    assert.equal(st.meta.sticker, true);
+    assert.equal(st.attachments[0].id, up.id);
+  });
+
   await step('leaving, and the owner can’t leave without handing over', async () => {
     assert.equal((await api('POST', `/api/servers/${server.id}/leave`, { token: owner.token })).status, 400);
     assert.equal((await api('POST', `/api/servers/${server.id}/leave`, { token: dave.token })).status, 200);

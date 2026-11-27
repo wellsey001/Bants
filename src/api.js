@@ -37,9 +37,24 @@ const MEDIA_DIR = () => path.join(config.dataDir, 'media');
 
 // ───────────────────────── serialisers ─────────────────────────
 
+export const DECORATIONS = ['rainbow', 'fire', 'hearts', 'sparkle', 'neon', 'gold', 'snow', 'halo', 'crown', 'cat'];
+export const PROFILE_EFFECTS = ['confetti', 'hearts', 'snow', 'sparkles', 'bubbles', 'fireworks', 'stars'];
+export const NAME_FONTS = ['default', 'bricolage', 'mono', 'serif', 'script', 'rounded'];
+const parseJson = (v) => { try { return v ? JSON.parse(v) : null; } catch { return null; } };
+/** The fun bits of a profile, shared by every place a person shows up. */
+export function flairOut(row) {
+  return {
+    themeColours: parseJson(row.theme_colours),
+    decoration: row.decoration || null,
+    profileEffect: row.profile_effect || null,
+    nameStyle: parseJson(row.name_style),
+  };
+}
+
 export function userOut(row, viewerId = null) {
   if (!row) return null;
   const out = {
+    ...flairOut(row),
     id: row.id,
     username: row.username,
     displayName: row.display_name,
@@ -81,11 +96,14 @@ export function messageOut(m) {
   let reactions = [];
   if (!m.deleted) {
     const grouped = new Map();
-    for (const r of q('SELECT emoji, user_id FROM reactions WHERE message_id = ? ORDER BY created_at').all(m.id)) {
-      if (!grouped.has(r.emoji)) grouped.set(r.emoji, []);
+    const bursts = new Map();
+    for (const r of q('SELECT emoji, user_id, burst FROM reactions WHERE message_id = ? ORDER BY created_at').all(m.id)) {
+      if (!grouped.has(r.emoji)) { grouped.set(r.emoji, []); bursts.set(r.emoji, []); }
       grouped.get(r.emoji).push(r.user_id);
+      if (r.burst) bursts.get(r.emoji).push(r.user_id);
     }
-    reactions = [...grouped].map(([emoji, userIds]) => ({ emoji, userIds }));
+    // superIds: who sent it as a super reaction (the big bursting kind).
+    reactions = [...grouped].map(([emoji, userIds]) => ({ emoji, userIds, superIds: bursts.get(emoji) }));
   }
   const media = !m.deleted && m.media_id ? q('SELECT mime, size, filename FROM media WHERE id = ?').get(m.media_id) : null;
   const meta = m.deleted ? null : parseMeta(m.meta);
@@ -616,6 +634,22 @@ route('PATCH', '/api/me', ({ user, body }) => {
   const pronouns = str(body.pronouns, 40, 'pronouns');
   const customStatus = str(body.customStatus, 128, 'customStatus');
   const statusEmoji = str(body.statusEmoji, 16, 'statusEmoji');
+  // Flair
+  const colour = (v) => Number(v) & 0xffffff;
+  if (body.themeColours !== undefined) {
+    const t = Array.isArray(body.themeColours) && body.themeColours.length === 2 ? JSON.stringify(body.themeColours.map(colour)) : null;
+    q('UPDATE users SET theme_colours = ? WHERE id = ?').run(t, user.id);
+  }
+  if (body.decoration !== undefined) q('UPDATE users SET decoration = ? WHERE id = ?').run(DECORATIONS.includes(body.decoration) ? body.decoration : null, user.id);
+  if (body.profileEffect !== undefined) q('UPDATE users SET profile_effect = ? WHERE id = ?').run(PROFILE_EFFECTS.includes(body.profileEffect) ? body.profileEffect : null, user.id);
+  if (body.nameStyle !== undefined) {
+    const ns = body.nameStyle;
+    const out = ns && typeof ns === 'object' ? {
+      font: NAME_FONTS.includes(ns.font) ? ns.font : 'default',
+      colours: Array.isArray(ns.colours) ? ns.colours.slice(0, 2).map(colour) : [],
+    } : null;
+    q('UPDATE users SET name_style = ? WHERE id = ?').run(out && (out.font !== 'default' || out.colours.length) ? JSON.stringify(out) : null, user.id);
+  }
   const oldMedia = [user.avatar_media, user.banner_media];
   q(`UPDATE users SET display_name = ?, about = ?, avatar_media = ?, banner_media = ?, accent_colour = ?,
        pronouns = ?, custom_status = ?, status_emoji = ? WHERE id = ?`).run(
@@ -1123,11 +1157,12 @@ route('POST', '/api/messages/:id/react', ({ user, params, body }) => {
   if (emoji.startsWith('<') && !emojiHooks.reactionOk(emoji, user.id) && !q('SELECT 1 FROM reactions WHERE message_id = ? AND emoji = ?').get(m.id, emoji)) {
     throw bad('You can only react with your own custom emojis');
   }
-  const existing = q('SELECT emoji FROM reactions WHERE message_id = ? AND user_id = ?').get(m.id, user.id);
-  if (existing && existing.emoji === emoji) {
+  const existing = q('SELECT emoji, burst FROM reactions WHERE message_id = ? AND user_id = ?').get(m.id, user.id);
+  const burst = body.super ? 1 : 0;
+  if (existing && existing.emoji === emoji && existing.burst === burst) {
     q('DELETE FROM reactions WHERE message_id = ? AND user_id = ?').run(m.id, user.id);
   } else {
-    q('INSERT OR REPLACE INTO reactions (message_id, user_id, emoji, created_at) VALUES (?, ?, ?, ?)').run(m.id, user.id, emoji, Date.now());
+    q('INSERT OR REPLACE INTO reactions (message_id, user_id, emoji, created_at, burst) VALUES (?, ?, ?, ?, ?)').run(m.id, user.id, emoji, Date.now(), burst);
   }
   const out = messageOut(m);
   sendToConversation(m.conversation_id, { type: 'message.updated', message: out });
