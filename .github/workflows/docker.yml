@@ -22,6 +22,24 @@ jobs:
       - name: Run tests
         run: npm test
 
+      # The web version is the Windows app's screens, served by the server itself.
+      - name: Get the web version (from bants-desktop)
+        uses: actions/checkout@v4
+        with:
+          repository: wellsey001/bants-desktop
+          ref: main
+          path: desktop
+
+      - name: Add the web version to the image
+        run: |
+          cp -r desktop/renderer/. web/
+          # Camera backgrounds load MediaPipe from /node_modules/ (the same path the Windows app uses).
+          mkdir -p /tmp/mp && cd /tmp/mp && npm init -y >/dev/null && npm install --no-audit --no-fund @mediapipe/tasks-vision@0.10.14
+          mkdir -p "$GITHUB_WORKSPACE/web/node_modules/@mediapipe"
+          cp -r /tmp/mp/node_modules/@mediapipe/tasks-vision "$GITHUB_WORKSPACE/web/node_modules/@mediapipe/"
+          rm -rf "$GITHUB_WORKSPACE/desktop"
+          ls "$GITHUB_WORKSPACE/web"
+
       - uses: docker/setup-qemu-action@v3
       - uses: docker/setup-buildx-action@v3
 

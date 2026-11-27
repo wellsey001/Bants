@@ -44,6 +44,11 @@ Data is stored in `/mnt/user/appdata/bants-server`, which holds the database and
 2. Add a **Public hostname**, for example `chat.yourdomain.com`, pointing to **Service: HTTP**, `YOUR-UNRAID-IP:42069`.
 3. WebSockets work through tunnels by default. The app then uses `https://chat.yourdomain.com` and `wss://chat.yourdomain.com/ws`.
 
+
+### Bants in a web browser
+
+Once it's reachable, opening `https://chat.yourdomain.com` in any browser gives you the web version: the same screens as the Windows app, with a phone layout. People can make an account there, and invite links (`/invite/CODE`) open the Join a server box. On an iPhone, tap **Share → Add to Home Screen** to get it as an app. Microphones and cameras only work over HTTPS, which the tunnel gives you.
+
 ## 4. Push notifications (optional, do this once the app exists)
 
 1. Create a Firebase project and add an Android app with your app's package name.

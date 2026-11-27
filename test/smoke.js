@@ -9,8 +9,13 @@ const port = 18000 + Math.floor(Math.random() * 1000);
 const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'msgr-'));
 const base = `http://127.0.0.1:${port}`;
 
+// A pretend web version, to check the server hands it out safely.
+const webDir = fs.mkdtempSync(path.join(os.tmpdir(), 'bants-web-'));
+fs.writeFileSync(path.join(webDir, 'index.html'), '<!DOCTYPE html><title>Bants web</title>');
+fs.mkdirSync(path.join(webDir, 'js'));
+fs.writeFileSync(path.join(webDir, 'js', 'app.js'), 'console.log(1)');
 const server = spawn(process.execPath, ['--disable-warning=ExperimentalWarning', 'src/index.js'], {
-  env: { ...process.env, PORT: String(port), DATA_DIR: dataDir, INVITE_CODE: 'letmein', SWEEP_INTERVAL_MS: '300', REGISTER_LIMIT: '50', TURN_SECRET: 'turnsecret', TURN_HOST: 'turn.example.com', GIPHY_API_KEY: '' },
+  env: { ...process.env, PORT: String(port), DATA_DIR: dataDir, WEB_DIR: webDir, INVITE_CODE: 'letmein', SWEEP_INTERVAL_MS: '300', REGISTER_LIMIT: '50', TURN_SECRET: 'turnsecret', TURN_HOST: 'turn.example.com', GIPHY_API_KEY: '' },
   stdio: ['ignore', 'pipe', 'inherit'],
 });
 await new Promise((resolve) => server.stdout.on('data', (d) => String(d).includes('listening') && resolve()));
@@ -476,6 +481,21 @@ try {
     assert.equal((await api('GET', '/api/me', { token: carol.token })).status, 401);
   });
 
+  await step('serves the web version', async () => {
+    const page = await fetch(base + '/');
+    assert.equal(page.status, 200);
+    assert.match(page.headers.get('content-type'), /text\/html/);
+    assert.match(await page.text(), /Bants web/);
+    const js = await fetch(base + '/js/app.js');
+    assert.match(js.headers.get('content-type'), /javascript/);
+    const inv = await fetch(base + '/invite/abc123', { redirect: 'manual' });
+    assert.equal(inv.status, 302);
+    assert.equal(inv.headers.get('location'), '/?invite=abc123');
+    assert.equal((await fetch(base + '/%2e%2e/package.json')).status, 404);
+    assert.equal((await fetch(base + '/nope.js')).status, 404);
+    assert.equal((await fetch(base + '/api/nope')).status, 404);
+  });
+
   aliceWs.close();
   bobWs.close();
   console.log(`\nAll ${passed} checks passed.`);
@@ -485,4 +505,5 @@ try {
 } finally {
   server.kill();
   fs.rmSync(dataDir, { recursive: true, force: true });
+  fs.rmSync(webDir, { recursive: true, force: true });
 }

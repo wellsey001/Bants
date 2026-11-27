@@ -3,3 +3,5 @@ node_modules/
 *.json.key
 firebase*.json
 .env
+web/*
+!web/README.md

@@ -7,6 +7,7 @@ ENV NODE_ENV=production \
     DATA_DIR=/data
 COPY package.json ./
 COPY src ./src
+COPY web ./web
 RUN mkdir -p /data
 VOLUME /data
 EXPOSE 42069

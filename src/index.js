@@ -20,6 +20,7 @@ import { sendChannelMessage, sendChannelTyping, markChannelRead, notifyServerPre
 import './community.js';
 import { handleCallMessage, onSessionGone } from './calls.js';
 import { scheduleBackups } from './backup.js';
+import { serveWeb } from './web.js';
 
 const MAX_JSON = 1024 * 1024;
 
@@ -94,6 +95,7 @@ const server = http.createServer(async (req, res) => {
       match = { r, m };
       break;
     }
+    if (!match && !methodMismatch && serveWeb(req, res, url.pathname)) return;
     if (!match) throw new HttpError(methodMismatch ? 405 : 404, methodMismatch ? 'Method not allowed' : 'Not found');
 
     const { r, m } = match;
