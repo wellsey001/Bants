@@ -11,12 +11,14 @@ import { q } from './db.js';
 import { sendToUser, sendToSession, isOnline, sessionOnline } from './hub.js';
 import { pushToUser } from './push.js';
 import { HttpError, route, getUser, addCallMessage, isBlocked } from './api.js';
+import { P, has, channelPermissions } from './permissions.js';
 
 const RING_MS = 40_000;
 const MAX_GROUP = 8;
 const calls = new Map(); // callId -> call
 const busy = new Map(); // userId -> callId
 const activeByConv = new Map(); // conversationId -> group callId
+const voiceRooms = new Map(); // voice channelId -> callId
 
 const bad = (m) => new HttpError(400, m);
 
@@ -187,6 +189,18 @@ export function handleCallMessage(userId, tokenHash, msg) {
       return null;
     }
 
+    case 'voice.join':
+      return joinVoice(userId, tokenHash, Number(msg.channelId));
+
+    case 'voice.update': {
+      // Muted / deafened / camera, shown next to your name in the channel list.
+      const g = calls.get(busy.get(userId));
+      if (!g?.voice || g.participants.get(userId) !== tokenHash) return null;
+      g.flags.set(userId, { muted: !!msg.muted, deafened: !!msg.deafened, video: !!msg.video });
+      broadcastVoice(g.channelId);
+      return null;
+    }
+
     default:
       throw bad(`Unknown event type: ${msg.type}`);
   }
@@ -238,10 +252,103 @@ export function onSessionGone(userId, tokenHash) {
   }, 30_000).unref();
 }
 
+// ───────────── voice channels ─────────────
+// A voice channel is a group call that's always there: people drop in and out, nobody rings.
+// Same mesh and signalling as group calls, so the apps reuse their call code.
+
+/** Who's in a voice channel right now, with their mute/deafen state. */
+export function voiceMembers(channelId) {
+  const g = calls.get(voiceRooms.get(channelId));
+  if (!g) return [];
+  return [...g.participants.keys()].map((id) => ({ id, ...(g.flags.get(id) || { muted: false, deafened: false, video: false }) }));
+}
+
+/** Tell everyone in the server who can see the channel who's in it now. */
+function broadcastVoice(channelId, serverId = null) {
+  const ch = q('SELECT server_id FROM channels WHERE id = ?').get(channelId);
+  const sid = ch?.server_id ?? serverId;
+  if (!sid) return;
+  const members = voiceMembers(channelId);
+  for (const { user_id } of q('SELECT user_id FROM server_members WHERE server_id = ?').all(sid)) {
+    if (!ch || has(channelPermissions(channelId, user_id), P.VIEW_CHANNEL)) {
+      sendToUser(user_id, { type: 'voice.state', serverId: sid, channelId, members });
+    }
+  }
+}
+
+function joinVoice(userId, tokenHash, channelId) {
+  const ch = q('SELECT * FROM channels WHERE id = ?').get(channelId);
+  if (!ch || ch.type !== 'voice' || !has(channelPermissions(channelId, userId), P.VIEW_CHANNEL)) throw new HttpError(404, 'Channel not found');
+  if (!has(channelPermissions(channelId, userId), P.CONNECT)) throw new HttpError(403, 'You can’t join this voice channel');
+  const server = q('SELECT name FROM servers WHERE id = ?').get(ch.server_id);
+  const name = `${ch.name} · ${server?.name || 'Server'}`;
+
+  // Already in another call or voice channel: leave it first (that's what hopping channels means).
+  const current = calls.get(busy.get(userId));
+  if (current && !(current.voice && current.channelId === channelId)) {
+    if (current.group) leaveGroup(current, userId);
+    else throw bad('You’re already on a call');
+  }
+
+  let g = calls.get(voiceRooms.get(channelId));
+  if (!g) {
+    g = {
+      id: crypto.randomUUID(),
+      group: true,
+      voice: true,
+      channelId,
+      serverId: ch.server_id,
+      groupName: name,
+      video: false,
+      startedBy: userId,
+      startedAt: Date.now(),
+      answeredAt: Date.now(),
+      participants: new Map(),
+      flags: new Map(),
+      everJoined: new Set(),
+      ringing: new Set(),
+    };
+    calls.set(g.id, g);
+    voiceRooms.set(channelId, g.id);
+  }
+  const limit = Math.min(MAX_GROUP, ch.voice_limit || MAX_GROUP);
+  if (!g.participants.has(userId) && g.participants.size >= limit) {
+    throw bad(ch.voice_limit && ch.voice_limit < MAX_GROUP ? `This channel is full (${limit} max)` : `Voice channels hold up to ${MAX_GROUP} people for now`);
+  }
+  const reply = joinGroup(g, userId, tokenHash);
+  reply.groupName = name;
+  broadcastVoice(channelId);
+  return reply;
+}
+
+/** Someone was kicked, banned or left a server: take them out of its voice channels. */
+export function leaveVoiceIn(serverId, userId) {
+  const g = calls.get(busy.get(userId));
+  if (g?.voice && g.serverId === serverId) {
+    sendToSession(userId, g.participants.get(userId), { type: 'call.ended', callId: g.id, reason: 'removed' });
+    leaveGroup(g, userId);
+  }
+}
+
+/** A voice channel was deleted, or permissions changed: drop anyone who can't be there any more. */
+export function recheckVoice(serverId) {
+  for (const g of [...calls.values()]) {
+    if (!g.voice || g.serverId !== serverId) continue;
+    const ch = q('SELECT id FROM channels WHERE id = ?').get(g.channelId);
+    if (!ch) { finishGroup(g, 'channel_deleted'); continue; }
+    for (const [u, tok] of [...g.participants]) {
+      if (!has(channelPermissions(g.channelId, u), P.CONNECT)) {
+        sendToSession(u, tok, { type: 'call.ended', callId: g.id, reason: 'removed' });
+        leaveGroup(g, u);
+      }
+    }
+  }
+}
+
 // Tidy up anything left hanging (e.g. both phones vanished mid-call).
 setInterval(() => {
   const cutoff = Date.now() - 6 * 3600_000;
-  for (const c of calls.values()) if (c.startedAt < cutoff) (c.group ? finishGroup(c, 'timeout') : finish(c, 'timeout'));
+  for (const c of calls.values()) if (c.startedAt < cutoff && !c.voice) (c.group ? finishGroup(c, 'timeout') : finish(c, 'timeout'));
 }, 10 * 60_000).unref();
 
 // ───────────── group calls ─────────────
@@ -252,6 +359,12 @@ function person(id) {
 }
 
 function groupOut(g) {
+  if (g.voice) {
+    return {
+      id: g.id, voice: true, group: true, channelId: g.channelId, serverId: g.serverId, conversationId: 0,
+      video: false, state: 'active', startedAt: g.startedAt, answeredAt: g.answeredAt, participants: [...g.participants.keys()],
+    };
+  }
   return {
     id: g.id,
     conversationId: g.conversationId,
@@ -358,6 +471,13 @@ function leaveGroup(g, userId) {
   g.participants.delete(userId);
   if (busy.get(userId) === g.id) busy.delete(userId);
   for (const [u, tok] of g.participants) sendToSession(u, tok, { type: 'call.participant.left', callId: g.id, userId, call: groupOut(g) });
+  if (g.voice) {
+    g.flags.delete(userId);
+    // Voice channels are rooms you drop in and out of: sitting in one alone is fine.
+    if (g.participants.size === 0) finishGroup(g, 'empty');
+    else broadcastVoice(g.channelId);
+    return;
+  }
   // Last one out turns off the lights; nobody stays on alone once ringing's over.
   if (g.participants.size === 0 || (g.participants.size === 1 && !g.ringing.size)) finishGroup(g, 'hangup');
 }
@@ -365,6 +485,16 @@ function leaveGroup(g, userId) {
 function finishGroup(g, reason) {
   if (!calls.has(g.id)) return;
   calls.delete(g.id);
+  if (g.voice) {
+    if (voiceRooms.get(g.channelId) === g.id) voiceRooms.delete(g.channelId);
+    for (const [u, tok] of g.participants) {
+      if (busy.get(u) === g.id) busy.delete(u);
+      sendToSession(u, tok, { type: 'call.ended', callId: g.id, reason });
+    }
+    g.participants.clear();
+    broadcastVoice(g.channelId, g.serverId);
+    return;
+  }
   if (activeByConv.get(g.conversationId) === g.id) activeByConv.delete(g.conversationId);
   clearTimeout(g.timer);
   for (const [u, tok] of g.participants) {

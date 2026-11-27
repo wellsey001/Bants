@@ -4,6 +4,7 @@ import crypto from 'node:crypto';
 import { q, tx } from './db.js';
 import { route, HttpError, getUser, mediaAccessChecks } from './api.js';
 import { sendToUser, isOnline } from './hub.js';
+import { voiceMembers, leaveVoiceIn, recheckVoice } from './calls.js';
 import {
   P, ALL, DEFAULT_EVERYONE, has, serverPermissions, channelPermissions, topRolePosition, outranks, canManageRole,
 } from './permissions.js';
@@ -93,6 +94,7 @@ function sendToServer(serverId, event, { exceptUserId = null } = {}) {
 }
 /** Anything that can change who sees what (roles, overrides, channels): send each member their own fresh view. */
 function refreshServer(serverId) {
+  recheckVoice(serverId);
   for (const uid of memberIds(serverId)) sendToUser(uid, { type: 'server.update', server: serverOut(serverId, uid) });
 }
 
@@ -115,7 +117,10 @@ function channelOut(c, viewerId, perms = channelPermissions(c.id, viewerId)) {
     mentionCount: read?.mention_count || 0,
     permissions: perms,
   };
-  if (c.type === 'voice') out.userLimit = c.voice_limit;
+  if (c.type === 'voice') {
+    out.userLimit = c.voice_limit;
+    out.voiceMembers = voiceMembers(c.id);
+  }
   if (c.type === 'thread') Object.assign(out, { ownerId: c.owner_id, archived: !!c.archived, locked: !!c.locked, starterMessageId: c.starter_message_id });
   return out;
 }
@@ -337,6 +342,7 @@ function newInviteCode() {
 }
 
 function removeMember(serverId, userId) {
+  leaveVoiceIn(serverId, userId);
   q('DELETE FROM server_members WHERE server_id = ? AND user_id = ?').run(serverId, userId);
   q('DELETE FROM channel_reads WHERE user_id = ? AND channel_id IN (SELECT id FROM channels WHERE server_id = ?)').run(userId, serverId);
   sendToUser(userId, { type: 'server.remove', serverId });
@@ -400,6 +406,7 @@ route('DELETE', '/api/servers/:id', ({ user, params }) => {
   if (s.owner_id !== user.id) throw forbidden('Only the owner can delete the server');
   const members = memberIds(s.id);
   q('DELETE FROM servers WHERE id = ?').run(s.id);
+  recheckVoice(s.id);
   for (const uid of members) sendToUser(uid, { type: 'server.remove', serverId: s.id });
   return { ok: true };
 });

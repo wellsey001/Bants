@@ -186,6 +186,48 @@ try {
     assert.equal((await api('POST', `/api/channels/${ann.id}/messages`, { token: owner.token, body: { body: 'big news' } })).status, 200);
   });
 
+  await step('voice channels: drop in, see who’s there, talk, leave', async () => {
+    const voice = server.channels.find((c) => c.type === 'voice');
+    ownerWs.json({ type: 'voice.join', channelId: voice.id });
+    const joined = await ownerWs.waitFor((e) => e.type === 'call.joined');
+    assert.equal(joined.call.voice, true);
+    assert.equal(joined.participants.length, 0, 'first one in has nobody to connect to');
+    const state = await daveWs.waitFor((e) => e.type === 'voice.state' && e.channelId === voice.id);
+    assert.deepEqual(state.members.map((m) => m.id), [owner.user.id]);
+    const view = (await api('GET', `/api/servers/${server.id}`, { token: dave.token })).data;
+    assert.equal(view.channels.find((c) => c.id === voice.id).voiceMembers.length, 1, 'channel list shows who is in voice');
+
+    daveWs.json({ type: 'voice.join', channelId: voice.id });
+    const dj = await daveWs.waitFor((e) => e.type === 'call.joined');
+    assert.deepEqual(dj.participants.map((p) => p.id), [owner.user.id]);
+    await ownerWs.waitFor((e) => e.type === 'call.participant.joined' && e.user.id === dave.user.id);
+    // Signals pass between the two of them
+    daveWs.json({ type: 'call.signal', callId: dj.call.id, to: owner.user.id, data: { sdp: 'offer' } });
+    const sig = await ownerWs.waitFor((e) => e.type === 'call.signal');
+    assert.equal(sig.from, dave.user.id);
+    // Mute shows up for everyone
+    daveWs.json({ type: 'voice.update', muted: true });
+    const muted = await ownerWs.waitFor((e) => e.type === 'voice.state' && e.members.some((m) => m.id === dave.user.id && m.muted));
+    assert.equal(muted.members.length, 2);
+    // Owner leaves: room stays open for Dave
+    ownerWs.json({ type: 'call.end', callId: joined.call.id });
+    await daveWs.waitFor((e) => e.type === 'call.participant.left' && e.userId === owner.user.id);
+    const after = await daveWs.waitFor((e) => e.type === 'voice.state' && e.members.length === 1);
+    assert.equal(after.members[0].id, dave.user.id);
+    // Last one out closes it
+    daveWs.json({ type: 'call.end', callId: dj.call.id });
+    await ownerWs.waitFor((e) => e.type === 'voice.state' && e.members.length === 0);
+  });
+
+  await step('voice respects permissions', async () => {
+    const vc = (await api('POST', `/api/servers/${server.id}/channels`, { token: owner.token, body: { name: 'Staff', type: 'voice' } })).data;
+    const everyone = server.roles.find((r) => r.isDefault).id;
+    await api('PUT', `/api/channels/${vc.id}/overrides/role/${everyone}`, { token: owner.token, body: { deny: 1 << 12 } });
+    daveWs.json({ type: 'voice.join', channelId: vc.id });
+    const err = await daveWs.waitFor((e) => e.type === 'error');
+    assert.match(err.error, /can’t join/);
+  });
+
   await step('edit, react, pin and delete', async () => {
     const m = (await api('POST', `/api/channels/${general.id}/messages`, { token: dave.token, body: { body: 'typo' } })).data;
     assert.equal((await api('PATCH', `/api/channel-messages/${m.id}`, { token: owner.token, body: { body: 'hijack' } })).status, 403);

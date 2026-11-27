@@ -183,7 +183,7 @@ server.on('upgrade', (req, socket, head) => {
           break;
         }
         default:
-          if (typeof msg.type === 'string' && msg.type.startsWith('call.')) {
+          if (typeof msg.type === 'string' && (msg.type.startsWith('call.') || msg.type.startsWith('voice.'))) {
             const reply = handleCallMessage(userId, session.tokenHash, msg);
             if (reply) conn.send(reply);
             break;
