@@ -17,7 +17,7 @@ import {
 import { sendToUser, sendToConversation, isOnline, disconnect } from './hub.js';
 import { pushToUser, pushEnabled } from './push.js';
 import { backupStatus, runBackup } from './backup.js';
-import { registrationSettings, setSetting } from './settings.js';
+import { registrationSettings, setSetting, getPublicUrl } from './settings.js';
 import { firstUrl, fetchPreview } from './previews.js';
 import { gifsEnabled, findGifs, downloadGif } from './gifs.js';
 
@@ -575,6 +575,7 @@ route('GET', '/api/server', () => {
     push: pushEnabled(),
     calls: true,
     callRelay: !!process.env.TURN_SECRET,
+    publicUrl: getPublicUrl(),
     unsend: true,
     // The app shows the Chats / Servers switch when this is true.
     servers: true,

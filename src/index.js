@@ -21,6 +21,7 @@ import './community.js';
 import { handleCallMessage, onSessionGone } from './calls.js';
 import { scheduleBackups } from './backup.js';
 import { serveWeb } from './web.js';
+import { notePublicUrl } from './settings.js';
 
 const MAX_JSON = 1024 * 1024;
 
@@ -82,6 +83,7 @@ const server = http.createServer(async (req, res) => {
 
   const url = new URL(req.url, 'http://localhost');
   const started = Date.now();
+  try { notePublicUrl(req); } catch { /* only a nicety */ }
   try {
     let match = null;
     let methodMismatch = false;

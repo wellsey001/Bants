@@ -62,7 +62,7 @@ Once it's reachable, opening `https://chat.yourdomain.com` in any browser gives 
 - People can **make an account** there (with the sign-up code, if your server needs one). That makes it the way in for iPhone users.
 - **Invite links** (`https://chat.yourdomain.com/invite/CODE`) open the web version with Join a server already filled in.
 - On an **iPhone**, tap **Share → Add to Home Screen** to get it as an app. On Android Chrome, use **Install app**.
-- **Microphones and cameras only work over HTTPS**, which the tunnel gives you.
+- **Microphones and cameras only work over HTTPS**, which the tunnel gives you. Opened on a local address like `http://192.168.x.x:port`, the web version shows a bar with a button to switch to your https address.
 - Notifications only show while Bants is open in the browser. Phones can't share their screen from a browser.
 
 The web files come from [bants-desktop](https://github.com/wellsey001/bants-desktop)'s `renderer/` folder, which is copied into the image when it's built. So the web version updates when the server image does. To try it when running locally, copy that folder into `web/`, or set `WEB_DIR` to point at it.
@@ -208,6 +208,7 @@ From the admin page you can:
 | `LOG_REQUESTS` | `false` | Log every HTTP request |
 | `MAX_SERVERS_PER_USER` | `25` | Most servers one person can own |
 | `WEB_DIR` | `/app/web` | Where the web version's files are (already in the image) |
+| `PUBLIC_URL` | (learnt) | Your https address, e.g. `https://chat.yourdomain.com`. The web version sends people there if they open it on a plain http address, where cameras and mics are blocked. Bants learns it by itself the first time someone visits through Cloudflare. |
 
 ## Running locally / tests
 

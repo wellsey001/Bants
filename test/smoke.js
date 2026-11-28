@@ -494,6 +494,9 @@ try {
     assert.equal((await fetch(base + '/%2e%2e/package.json')).status, 404);
     assert.equal((await fetch(base + '/nope.js')).status, 404);
     assert.equal((await fetch(base + '/api/nope')).status, 404);
+    // Learns its https address from a request that came through an https proxy.
+    await fetch(base + '/api/server', { headers: { 'x-forwarded-proto': 'https', 'x-forwarded-host': 'chat.example.com' } });
+    assert.equal((await (await fetch(base + '/api/server')).json()).publicUrl, 'https://chat.example.com');
   });
 
   aliceWs.close();
