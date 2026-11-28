@@ -2,9 +2,19 @@
 
 # Bants server
 
-Self-hosted backend for **Bants**, a WhatsApp-style messaging app. It runs as one small Docker container on Unraid and has **no npm dependencies**. It uses Node 22's built-in SQLite, HTTP server and crypto.
+Self-hosted backend for **Bants**, a WhatsApp-style messaging app with Discord-style servers. It runs as one small Docker container on Unraid and has **no npm dependencies**. It uses Node 22's built-in SQLite, HTTP server and crypto. It also hosts the **web version** of Bants, so anyone can use it in a browser.
 
-**Features:** accounts, Discord-style servers (channels, categories, threads, roles and permissions, invite links, moderation), usernames and friend codes, contact requests, 1:1 and group chats, real-time delivery over WebSocket, typing indicators, delivered/read receipts, online/last seen, photos/videos/files/voice notes, replies and reactions, GIFs and stickers, @mentions, link previews, disappearing messages, pinned and archived chats, message search, edit and delete for everyone, blocking, Android push notifications via Firebase, and an admin page.
+**Apps:** [Android](https://github.com/wellsey001/bants-android) · [Windows](https://github.com/wellsey001/bants-desktop) · the web version (served by this server).
+
+**Chats:** accounts, usernames and friend codes, contact requests, 1:1 and group chats, real-time delivery over WebSocket, typing indicators, delivered/read receipts, online/last seen, photos/videos/files/voice notes, replies, reactions and super reactions, GIFs, stickers and custom emojis, polls, locations, forwarding, @mentions, link previews, disappearing messages, pinned and archived chats, message search, edit and delete for everyone, blocking.
+
+**Servers:** text, announcement, forum, voice and stage channels, categories, threads, roles and permissions (with role colours and icons), invite links and your own never-expiring server link, rules screening, events, polls, webhooks, server emojis and stickers, a soundboard, moderation (kick, ban, timeout, slowmode, audit log), animated icons, banners and invite backgrounds.
+
+**Calls:** 1:1 and group voice/video calls, voice channels with screen sharing, camera and voice quality settings, join/leave sounds, and stage channels with raise-hand.
+
+**Profiles:** avatars and banners (GIFs move), bios, pronouns, profile themes, avatar decorations, profile effects and name styles.
+
+**Running it:** Android push notifications via Firebase, encrypted nightly backups and an admin page.
 
 > Messages are stored unencrypted in the database on your server (`/data/bants.db`). Traffic is encrypted in transit by HTTPS through Cloudflare Tunnel.
 
@@ -47,7 +57,15 @@ Data is stored in `/mnt/user/appdata/bants-server`, which holds the database and
 
 ### Bants in a web browser
 
-Once it's reachable, opening `https://chat.yourdomain.com` in any browser gives you the web version: the same screens as the Windows app, with a phone layout. People can make an account there, and invite links (`/invite/CODE`) open the Join a server box. On an iPhone, tap **Share → Add to Home Screen** to get it as an app. Microphones and cameras only work over HTTPS, which the tunnel gives you.
+Once it's reachable, opening `https://chat.yourdomain.com` in any browser gives you the **web version**: the same screens as the Windows app, with a one-screen-at-a-time layout on phones.
+
+- People can **make an account** there (with the sign-up code, if your server needs one). That makes it the way in for iPhone users.
+- **Invite links** (`https://chat.yourdomain.com/invite/CODE`) open the web version with Join a server already filled in.
+- On an **iPhone**, tap **Share → Add to Home Screen** to get it as an app. On Android Chrome, use **Install app**.
+- **Microphones and cameras only work over HTTPS**, which the tunnel gives you.
+- Notifications only show while Bants is open in the browser. Phones can't share their screen from a browser.
+
+The web files come from [bants-desktop](https://github.com/wellsey001/bants-desktop)'s `renderer/` folder, which is copied into the image when it's built. So the web version updates when the server image does. To try it when running locally, copy that folder into `web/`, or set `WEB_DIR` to point at it.
 
 ## 4. Push notifications (optional, do this once the app exists)
 
@@ -118,16 +136,21 @@ Servers are Discord-style communities that sit alongside chats. In the app, one 
 - **Roles** carry permissions (see `src/permissions.js`). Every server has `@everyone`. A channel can override permissions for a role or a person, for example a private `#mods` channel or a read-only `#announcements`. Channels follow their category's overrides unless you change their own.
 - **Rules:** the owner and anyone with Administrator can do everything. Moderators can only kick, ban, time out or edit people and roles below their own top role. Nobody can give out permissions they don't have.
 - **Moderation:** kick, ban (optionally wiping their last 7 days of messages), timeout (read-only for up to 28 days), slowmode, pins, deleting others' messages, and an audit log.
-- **Messages:** replies, several attachments, multiple reactions per person, `<@user>` and `<@&role>` mentions, `@everyone` (only with permission), unread dots and red mention badges.
+- **Messages:** replies, several attachments, multiple reactions per person (and super reactions), GIFs, stickers, polls, `<@user>` and `<@&role>` mentions, `@everyone` (only with permission), unread dots and red mention badges.
+- **Community:** forum channels (each post is a thread), rules people must accept before talking, events with RSVPs, webhooks for posting from other apps, and up to 50 custom emojis per server (static or animated).
+- **Looks:** animated (GIF) icon and banner, an invite background shown when someone opens your invite, role icons (an emoji or a small picture next to names), and a **server link**: a name like `the-lads` that works as an invite and never runs out.
+- **Soundboard:** up to 30 short sounds per server that anyone in voice can play. Favourite a sound to use it in any server.
 
-**Voice channels** are rooms you drop in and out of. They use the same WebRTC mesh and coturn relay as group calls (section 6), so there's nothing extra to set up. Each room holds up to 8 people, or fewer if the channel has a user limit. Over the WebSocket, send `voice.join` `{ channelId }` to join (you get `call.joined`, then normal `call.signal` messages) and `voice.update` `{ muted, video, screen }` for your mute, camera and screen-share state. Each voice channel also has its own text chat, using the normal channel message routes. Everyone who can see the channel gets `voice.state` `{ channelId, members }` when someone joins, leaves or mutes. Leave with `call.end`. Anyone who's kicked, banned or loses access to the channel is taken out automatically.
+**Voice channels** are rooms you drop in and out of. They use the same WebRTC mesh and coturn relay as group calls (section 6), so there's nothing extra to set up. Each room holds up to 8 people, or fewer if the channel has a user limit. Over the WebSocket, send `voice.join` `{ channelId }` to join (you get `call.joined`, then normal `call.signal` messages) and `voice.update` `{ muted, video, screen }` for your mute, camera and screen-share state. Each voice channel also has its own text chat, using the normal channel message routes. Everyone who can see the channel gets `voice.state` `{ channelId, members }` when someone joins, leaves or mutes. Leave with `call.end`. Anyone who's kicked, banned or loses access to the channel is taken out automatically. If you join from a second device, you move to it and the first one is told it's no longer in.
+
+**Stage channels** are voice channels where moderators speak and everyone else listens. Listeners can raise a hand (`stage.hand`), and moderators can invite them up (`stage.speaker`). Each voice channel also has a **voice quality** setting (32–256 kbps).
 
 ### Servers API (all need `Authorization: Bearer <token>`)
 
 | | |
 |---|---|
 | `GET/POST /api/servers` | Your servers / create one `{ name }` |
-| `GET/PATCH/DELETE /api/servers/:id` | View, edit `{ name, description, icon, banner, systemChannelId }`, delete (owner) |
+| `GET/PATCH/DELETE /api/servers/:id` | View, edit `{ name, description, icon, banner, inviteBackground, vanity, systemChannelId }`, delete (owner) |
 | `POST /api/servers/:id/leave`, `/transfer` | Leave / hand to `{ userId }` (owner) |
 | `PATCH /api/servers/:id/me` | Your own `{ muted, position }` |
 | `GET /api/servers/:id/members` | Member list |
@@ -135,7 +158,7 @@ Servers are Discord-style communities that sit alongside chats. In the app, one 
 | `GET/POST/DELETE /api/servers/:id/bans[/:userId]` | Bans `{ reason, deleteMessageHours }` |
 | `POST/GET /api/servers/:id/invites` | Make `{ maxUses, expiresInHours }` / list |
 | `GET/POST/DELETE /api/invites/:code` | Preview / join / delete |
-| `POST /api/servers/:id/roles`, `PATCH/DELETE /api/roles/:id` | Roles `{ name, colour, permissions, hoist, mentionable, position }` |
+| `POST /api/servers/:id/roles`, `PATCH/DELETE /api/roles/:id` | Roles `{ name, colour, permissions, hoist, mentionable, position, iconEmoji, iconMedia }` |
 | `POST /api/servers/:id/channels`, `PATCH/DELETE /api/channels/:id` | Channels `{ name, type, parentId, topic, private, roleIds, slowmode, ... }` |
 | `GET/PUT/DELETE /api/channels/:id/overrides/:role\|member/:id` | Permission overrides `{ allow, deny }` |
 | `GET/POST /api/channels/:id/threads` | Threads `{ name, messageId }` |
@@ -144,6 +167,13 @@ Servers are Discord-style communities that sit alongside chats. In the app, one 
 | `PUT/DELETE /api/channel-messages/:id/reactions/:emoji`, `/pin` | Reactions, pins |
 | `GET /api/channels/:id/pins`, `POST /api/channels/:id/read`, `POST /api/servers/:id/read` | Pins, mark read |
 | `GET /api/servers/:id/search?q=`, `/audit-log` | Search, audit log |
+| `GET/PUT /api/servers/:id/rules`, `POST /accept-rules` | Rules screening |
+| `GET/POST /api/servers/:id/events`, `/api/events/:id[/rsvp]` | Events and RSVPs |
+| `POST /api/channels/:id/polls`, `/api/channel-messages/:id/vote` | Polls |
+| `GET/POST /api/channels/:id/webhooks`, `POST /api/webhooks/:id/:token` | Webhooks (the second one needs no login) |
+| `GET/POST /api/servers/:id/emojis`, `/api/server-emojis/:id` | Server emojis |
+| `GET/POST /api/servers/:id/sounds`, `/api/sounds/:id[/favourite]`, `GET /api/me/sounds` | Soundboard |
+| `POST /api/channels/:id/gif`, `/sticker` | Send a GIF or one of your stickers |
 
 WebSocket: send `channel.send` `{ channelId, body, clientId }`, `channel.typing` `{ channelId }`, `channel.read` `{ channelId, messageId }`. You receive `channel.ack`, `channel.message` (with `mentioned`), `channel.message.update`, `channel.message.delete`, `channel.reaction`, `channel.typing`, `channel.read`, `channel.thread.create/update/delete`, `server.add`, `server.update` (your own fresh view whenever roles, channels or permissions change), `server.remove`, `server.member.add/update/remove` and `server.presence`.
 
@@ -153,6 +183,7 @@ Open `https://your-domain/admin` and log in with your Bants account. The first a
 
 From the admin page you can:
 - See how many people, chats, messages and files the server has
+- Check when the last encrypted backup ran, and run one now
 - Turn sign-ups on or off and change the invite code (this overrides the container's settings)
 - Reset someone's password (you get a temporary one to send them)
 - Make or remove admins
@@ -176,12 +207,13 @@ From the admin page you can:
 | `TRUST_PROXY` | `true` | Read real client IPs from Cloudflare headers |
 | `LOG_REQUESTS` | `false` | Log every HTTP request |
 | `MAX_SERVERS_PER_USER` | `25` | Most servers one person can own |
+| `WEB_DIR` | `/app/web` | Where the web version's files are (already in the image) |
 
 ## Running locally / tests
 
 ```
 npm start          # needs Node 22.5+
-npm test           # spins up a temp server and runs 28 end-to-end checks
+npm test           # spins up temp servers and runs the end-to-end checks (chats, then servers)
 ```
 
 ---
