@@ -159,7 +159,8 @@ export function handleCallMessage(userId, tokenHash, msg) {
     case 'call.end': {
       const g = calls.get(String(msg.callId));
       if (g?.group) {
-        if (g.participants.has(userId)) leaveGroup(g, userId);
+        // Only the device that's actually in the call can take you out of it.
+        if (g.participants.get(userId) === tokenHash) leaveGroup(g, userId);
         return { type: 'call.ended', callId: g.id, reason: 'hangup' };
       }
       const c = g;
@@ -376,6 +377,14 @@ function joinVoice(userId, tokenHash, channelId) {
   }
   // On a stage, moderators start as speakers; everyone else joins the audience.
   if (g.stage && fresh && isStageMod(g, userId)) g.speakers.add(userId);
+  // Joining from another device (phone → browser, say) moves you: tell the old one it's no longer in.
+  const before = g.participants.get(userId);
+  if (before && before !== tokenHash) {
+    sendToSession(userId, before, { type: 'call.ended', callId: g.id, reason: 'elsewhere' });
+    // Everyone else drops the old device's connection and links up with the new one.
+    g.participants.delete(userId);
+    for (const [u, tok] of g.participants) sendToSession(u, tok, { type: 'call.participant.left', callId: g.id, userId, call: groupOut(g) });
+  }
   const reply = joinGroup(g, userId, tokenHash);
   reply.groupName = name;
   reply.bitrate = ch.bitrate || 64;
