@@ -11,7 +11,7 @@ const base = `http://127.0.0.1:${port}`;
 
 // A pretend web version, to check the server hands it out safely.
 const webDir = fs.mkdtempSync(path.join(os.tmpdir(), 'bants-web-'));
-fs.writeFileSync(path.join(webDir, 'index.html'), '<!DOCTYPE html><title>Bants web</title>');
+fs.writeFileSync(path.join(webDir, 'index.html'), '<!DOCTYPE html><title>Bants web</title><link rel="stylesheet" href="styles.css"><script src="js/app.js"></script>');
 fs.mkdirSync(path.join(webDir, 'js'));
 fs.writeFileSync(path.join(webDir, 'js', 'app.js'), 'console.log(1)');
 const server = spawn(process.execPath, ['--disable-warning=ExperimentalWarning', 'src/index.js'], {
@@ -485,7 +485,11 @@ try {
     const page = await fetch(base + '/');
     assert.equal(page.status, 200);
     assert.match(page.headers.get('content-type'), /text\/html/);
-    assert.match(await page.text(), /Bants web/);
+    const html = await page.text();
+    assert.match(html, /Bants web/);
+    assert.match(html, /src="js\/app\.js\?v=[^"]+"/); // scripts carry the build, so updates show up straight away
+    assert.match(html, /href="styles\.css\?v=[^"]+"/);
+    assert.equal(page.headers.get('cache-control'), 'no-store');
     const js = await fetch(base + '/js/app.js');
     assert.match(js.headers.get('content-type'), /javascript/);
     const inv = await fetch(base + '/invite/abc123', { redirect: 'manual' });
